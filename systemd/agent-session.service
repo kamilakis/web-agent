@@ -1,0 +1,22 @@
+[Unit]
+Description=Always-on pi agent session (Siri commands -> Matrix)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-session-daemon
+Restart=on-failure
+RestartSec=5
+# Personal values go in Environment= lines, e.g.:
+#   Environment=AGENT_WEB_HOST=192.0.2.10        # bind the dashboard to your VPN IP
+#   Environment=AGENT_VISION_MODEL=deepseek/deepseek-v4-flash-vision-exp
+Environment=PI_SESSION_FILE=
+Environment=PI_SESSION_ID=
+Environment=PI_CODING_AGENT=
+Environment=PI_MODEL=
+Environment=PI_PROVIDER=
+Environment=PI_REASONING_LEVEL=
+
+[Install]
+WantedBy=default.target

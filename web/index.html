@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1f1e1d" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Agent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Agent</title>
+<link rel="icon" href="/media/site/favicon.ico" sizes="32x32">
+<link rel="icon" href="/media/site/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" sizes="180x180" href="/media/site/apple-touch-icon.png">
+<link rel="mask-icon" href="/media/site/favicon.svg" color="#2dd4bf">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg:#faf9f5;          /* warm cream */
+  --elev:#ffffff;
+  --surface:#f0eee6;     /* user bubble, pills */
+  --border:#e3e0d7;
+  --text:#1a1a18;
+  --dim:#6f6e69;
+  --accent:#c96442;      /* terracotta */
+  --accent-ink:#ffffff;
+  --ok:#5b8a54;
+  --danger:#bc4c3c;
+  --mono:ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#1f1e1d;
+    --elev:#262624;
+    --surface:#30302e;
+    --border:#3b3a37;
+    --text:#f5f4ef;
+    --dim:#a5a29b;
+    --accent:#d97757;
+    --accent-ink:#1f1e1d;
+    --ok:#7fb069;
+    --danger:#e0705c;
+  }
+}
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+/* .iconBtn sets display:grid, which would otherwise beat [hidden] */
+[hidden] { display:none !important; }
+html { -webkit-text-size-adjust:100%; }
+html, body { height:100%; margin:0; }
+body {
+  background:var(--bg); color:var(--text);
+  font:15.5px/1.5 var(--sans);
+  display:flex; flex-direction:column; height:100dvh;
+}
+
+/* ---------- header ---------- */
+header {
+  flex:0 0 auto; position:sticky; top:0; z-index:5;
+  display:flex; align-items:center; gap:9px;
+  padding:calc(env(safe-area-inset-top) + 11px) 14px 11px;
+  background:var(--bg); border-bottom:1px solid var(--border);
+}
+header .mark { flex:0 0 auto; width:17px; height:17px; display:block; }
+header .names { display:flex; flex-direction:column; min-width:0; line-height:1.15; }
+header .title { font-size:15px; font-weight:600; letter-spacing:-.01em; }
+header .session {
+  font-size:11px; color:var(--dim); font-family:var(--mono);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+header .spacer { flex:1 1 auto; }
+.status { display:flex; align-items:center; gap:5px; flex:0 0 auto; }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--dim); flex:0 0 auto; }
+.dot.idle { background:var(--ok); }
+.dot.busy { background:var(--accent); animation:pulse .9s ease-in-out infinite alternate; }
+.dot.warn { background:var(--danger); }
+@keyframes pulse { from { opacity:.35; transform:scale(.85); } to { opacity:1; transform:scale(1); } }
+#statusText { font-size:12px; color:var(--dim); white-space:nowrap; }
+#modelSel {
+  flex:0 1 auto; min-width:0; max-width:132px;
+  appearance:none; -webkit-appearance:none;
+  background:var(--surface); color:var(--text);
+  border:1px solid var(--border); border-radius:999px;
+  padding:5px 22px 5px 11px; font:500 12px/1 var(--sans);
+  text-overflow:ellipsis;
+  background-image:linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+                   linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+  background-position:calc(100% - 12px) 52%, calc(100% - 8px) 52%;
+  background-size:4px 4px, 4px 4px; background-repeat:no-repeat;
+}
+
+/* ---------- transcript ---------- */
+main {
+  flex:1 1 auto; overflow-y:auto; overscroll-behavior-y:contain;
+  -webkit-overflow-scrolling:touch;
+  display:flex; flex-direction:column;
+  padding:18px 16px 10px;
+}
+.msg { display:flex; flex-direction:column; margin:0 0 20px; }
+.msg.user { align-items:flex-end; }
+.msg.assistant { align-items:stretch; }
+.bubble { white-space:pre-wrap; overflow-wrap:anywhere; }
+/* the person's turn is a bubble; Claude's turn is plain prose, as in the app */
+.msg.user .bubble {
+  max-width:86%; padding:10px 14px;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:19px; border-bottom-right-radius:6px;
+}
+.msg.assistant .bubble { line-height:1.62; }
+.bubble code {
+  font-family:var(--mono); font-size:.88em;
+  background:var(--surface); border-radius:5px; padding:1px 5px;
+}
+.bubble pre {
+  font-family:var(--mono); font-size:12px; line-height:1.5;
+  background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:10px 12px; margin:10px 0; overflow-x:auto; white-space:pre;
+}
+.bubble pre code { background:none; padding:0; font-size:inherit; }
+.bubble .h { display:block; font-weight:650; margin:14px 0 3px; }
+.bubble .h:first-child { margin-top:0; }
+.bubble a { color:var(--accent); }
+.msg.assistant .bubble + .bubble { margin-top:12px; }
+.msg.assistant .atts { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.msg.assistant .atts img.att {
+  max-width:220px; max-height:220px; border-radius:12px;
+  border:1px solid var(--border); display:block; object-fit:cover;
+}
+/* §16 interactive choices */
+.choose { margin-top:10px; display:flex; flex-direction:column; gap:7px; }
+.chooseQ { font-size:13px; color:var(--dim); }
+.chooseBtn {
+  text-align:left; background:var(--surface); color:var(--text);
+  border:1px solid var(--border); border-radius:12px;
+  padding:9px 13px; font:14px/1.4 var(--sans); cursor:pointer;
+}
+.chooseBtn:active { border-color:var(--accent); color:var(--accent); }
+.chooseDone { font-size:13px; color:var(--accent); }
+.bubble.streaming::after {
+  content:""; display:inline-block; width:7px; height:1.02em;
+  margin-left:2px; vertical-align:-2px; background:var(--accent);
+  animation:blink 1.05s steps(1, end) infinite;
+}
+@keyframes blink { 50% { opacity:0; } }
+
+/* ---------- tool calls, Claude Code style ---------- */
+details.tool { width:100%; margin:10px 0 12px; font-family:var(--mono); font-size:12.5px; }
+details.tool summary {
+  display:flex; align-items:baseline; gap:7px;
+  list-style:none; cursor:pointer; user-select:none;
+  padding:1px 0; color:var(--dim);
+}
+details.tool summary::-webkit-details-marker { display:none; }
+details.tool summary::before {
+  content:"⏺"; font-size:9px; line-height:1.75; flex:0 0 auto; color:var(--dim);
+}
+details.tool.running summary::before { color:var(--accent); animation:pulse .9s ease-in-out infinite alternate; }
+details.tool.done summary::before { color:var(--ok); }
+details.tool.error summary::before { color:var(--danger); }
+details.tool .name { color:var(--text); flex:0 0 auto; }
+details.tool .arg {
+  flex:1 1 auto; min-width:0; color:var(--dim);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+details.tool .chev { flex:0 0 auto; font-size:10px; opacity:.5; transition:transform .15s; }
+details.tool[open] .chev { transform:rotate(90deg); }
+details.tool .out {
+  margin:5px 0 0 4px; padding:2px 0 2px 13px;
+  border-left:2px solid var(--border); color:var(--dim);
+  white-space:pre-wrap; overflow-wrap:anywhere;
+  font-size:12px; line-height:1.5;
+  max-height:240px; overflow:auto;
+  scrollbar-width:thin; scrollbar-color:var(--border) transparent;
+}
+details.tool .out:empty { display:none; }
+.empty {
+  margin:auto; padding:40px 24px; text-align:center;
+  color:var(--dim); font-size:14px;
+}
+
+/* ---------- composer ---------- */
+footer {
+  flex:0 0 auto; background:var(--bg); border-top:1px solid var(--border);
+  padding:9px 12px calc(10px + env(safe-area-inset-bottom));
+}
+#compose {
+  display:flex; align-items:center; gap:7px;
+  background:var(--elev); border:1px solid var(--border);
+  border-radius:24px; padding:4px 4px 4px 15px;
+  transition:border-color .15s;
+}
+#compose:focus-within { border-color:var(--accent); }
+#input {
+  flex:1 1 auto; min-width:0;
+  background:none; border:0; outline:none; color:var(--text);
+  font:16px/1.35 var(--sans); padding:9px 0;
+}
+#input::placeholder { color:var(--dim); }
+.iconBtn {
+  flex:0 0 auto; width:36px; height:36px; padding:0;
+  border:0; border-radius:50%; display:grid; place-items:center;
+  font-size:17px; line-height:1; transition:transform .1s, opacity .1s;
+}
+.iconBtn:active { transform:scale(.92); opacity:.85; }
+#sendBtn { background:var(--accent); color:var(--accent-ink); font-weight:700; }
+#stopBtn { background:var(--surface); color:var(--text); border:1px solid var(--border); font-size:12px; }
+#attachBtn { color:var(--dim); }
+#attachBtn svg { display:block; }
+#preview { display:flex; align-items:center; gap:8px; padding:0 4px 9px; }
+#preview img {
+  height:56px; max-width:140px; object-fit:cover;
+  border-radius:12px; border:1px solid var(--border);
+}
+#preview .rm {
+  width:24px; height:24px; border-radius:50%; padding:0;
+  background:var(--surface); color:var(--text);
+  border:1px solid var(--border); font-size:12px; line-height:1;
+  display:grid; place-items:center;
+}
+.msg.user .bubble img.attach {
+  display:block; margin-top:9px; max-width:70%; max-height:280px;
+  border-radius:12px; border:1px solid var(--border); object-fit:cover;
+}
+.msg.user .bubble img.attach:first-child { margin-top:0; }
+</style>
+</head>
+<body>
+<header>
+  <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+    <g stroke="var(--accent)" stroke-width="2.1" stroke-linecap="round">
+      <line x1="12" y1="3"   x2="12" y2="21"/>
+      <line x1="3"  y1="12"  x2="21" y2="12"/>
+      <line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/>
+      <line x1="18.4" y1="5.6" x2="5.6" y2="18.4"/>
+    </g>
+  </svg>
+  <div class="names">
+    <div class="title">Agent</div>
+    <div class="session" id="sessionName"></div>
+  </div>
+  <div class="spacer"></div>
+  <div class="status"><span class="dot warn" id="statusDot"></span><span id="statusText">connecting…</span></div>
+  <select id="modelSel" title="model" aria-label="model"></select>
+</header>
+<main id="log"></main>
+<footer>
+  <div id="preview" hidden></div>
+  <form id="compose" autocomplete="off">
+    <button id="attachBtn" class="iconBtn" type="button" title="Attach photo" aria-label="Attach photo">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M4 8a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+        <circle cx="9" cy="10" r="1.4" fill="currentColor"/>
+        <path d="M5.5 17.5 10 13l3 3 2.5-2.5 3 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <input id="input" placeholder="Reply to Agent…" enterkeyhint="send">
+    <button id="stopBtn" class="iconBtn" type="button" title="Stop" aria-label="Stop" hidden>■</button>
+    <button id="sendBtn" class="iconBtn" type="submit" title="Send" aria-label="Send">↑</button>
+  </form>
+  <input id="fileInput" type="file" accept="image/*" hidden>
+</footer>
+<script>
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get('token') || '';
+const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
+const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
+const logEl = document.getElementById('log');
+const input = document.getElementById('input');
+const stopBtn = document.getElementById('stopBtn');
+const sendBtn = document.getElementById('sendBtn');
+const modelSel = document.getElementById('modelSel');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const sessionName = document.getElementById('sessionName');
+const attachBtn = document.getElementById('attachBtn');
+const fileInput = document.getElementById('fileInput');
+const preview = document.getElementById('preview');
+let working = false;
+let curBubble = null;   // streaming assistant message container
+let curTxt = null;      // streaming text bubble
+let curTool = null;     // streaming tool row
+let firstOpen = true;
+let es = null;
+let mine = [];          // prompts this page sent, to dedupe the echoed user message
+let pendingImage = null;   // {type, data, mimeType} awaiting send
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function scrollBottom() { logEl.scrollTop = logEl.scrollHeight; }
+function setStatus(state) {
+  if (state === 'reconnecting…') {
+    statusText.textContent = state; statusDot.className = 'dot warn'; return;
+  }
+  working = !!state;
+  statusText.textContent = working ? 'working…' : '';
+  statusDot.className = 'dot ' + (working ? 'busy' : 'idle');
+  stopBtn.hidden = !working;
+  sendBtn.hidden = working;
+}
+function ensureMsg() {
+  if (!curBubble) { curBubble = el('div', 'msg assistant'); logEl.appendChild(curBubble); }
+  return curBubble;
+}
+function ensureTxt() {
+  ensureMsg();
+  if (!curTxt) { curTxt = el('div', 'bubble streaming'); curBubble.appendChild(curTxt); }
+  return curTxt;
+}
+function endCaret() { if (curTxt) curTxt.classList.remove('streaming'); }
+// Just enough markdown for what the agent writes. Escapes first, so the
+// transcript can never inject markup into the page.
+function mdToHtml(src) {
+  const blocks = [];
+  let s = String(src).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  s = s.replace(/```([\s\S]*?)```/g, (m, code) => {
+    blocks.push(code.replace(/^[A-Za-z0-9_+-]*\n/, '').replace(/\n$/, ''));
+    return '\u0000' + (blocks.length - 1) + '\u0000';
+  });
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
+  s = s.replace(/^[ \t]{0,3}#{1,4}[ \t]+(.+)\n?/gm, '<span class="h">$1</span>');
+  s = s.replace(/\n{3,}/g, '\n\n');
+  s = s.replace(/^(\s*)[-*]\s+/gm, '$1• ');
+  s = s.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => '<pre><code>' + blocks[+i] + '</code></pre>');
+  return s;
+}
+function appendDelta(delta) {
+  const t = ensureTxt();
+  t._raw = (t._raw || '') + delta;
+  t.innerHTML = mdToHtml(t._raw);
+}
+function resetStream() { endCaret(); curBubble = null; curTxt = null; curTool = null; }
+
+// ---- §16 interactive choices ----
+// Parse the LAST closed ```choose fence out of an assistant reply and swap it
+// for tappable option buttons. Returns {question, options} or null; `target`
+// is only mutated after validation succeeds.
+function applyChooseBlock(target, raw) {
+  const re = /```choose[^\n]*\n([\s\S]*?)```/gi;
+  let m, last = null;
+  while ((m = re.exec(raw)) !== null) last = m;
+  if (!last) return null;
+  const lines = last[1].split('\n').map(s => s.trim()).filter(Boolean);
+  const question = lines[0] || '';
+  const options = lines.slice(1).filter(l => l.startsWith('- '))
+                   .map(l => l.slice(2).trim()).filter(Boolean);
+  if (!question || !options.length) return null;
+  const cleaned = (raw.slice(0, last.index) + raw.slice(last.index + last[0].length)).trim();
+  target.classList.remove('streaming');
+  target.innerHTML = cleaned ? mdToHtml(cleaned) : '';
+  const wrap = el('div', 'choose');
+  wrap.appendChild(el('div', 'chooseQ', question));
+  for (const opt of options) {
+    const btn = document.createElement('button');
+    btn.className = 'chooseBtn';
+    btn.type = 'button';
+    btn.textContent = opt;
+    btn.onclick = () => chooseOption(wrap, opt);
+    wrap.appendChild(btn);
+  }
+  target.appendChild(wrap);
+  return { question, options };
+}
+function maybeApplyChoices() {
+  if (curTxt && curTxt._raw) applyChooseBlock(curTxt, curTxt._raw);
+}
+// A tap IS the user's next message: the option text goes out verbatim and the
+// buttons collapse to a chip so reconnect/snapshot re-renders stay consistent
+// (the staleness rule in renderSnapshot would hide them anyway).
+function chooseOption(wrap, opt) {
+  wrap.innerHTML = '';
+  wrap.appendChild(el('span', 'chooseDone', '→ ' + opt));
+  mine.push(opt);
+  appendUser(opt);
+  fetch('/prompt', {
+    method:'POST',
+    headers:{...H, 'Content-Type':'application/json'},
+    body: JSON.stringify({message: opt}),
+  }).catch(() => setStatus('reconnecting…'));
+}
+
+// ---- snapshot rendering ----
+function argPreview(arg) {
+  if (arg == null) return '';
+  if (typeof arg === 'string') return arg.trim().split('\n')[0];
+  if (typeof arg !== 'object') return String(arg);
+  for (const k of ['command','file_path','path','pattern','query','url','content','name','id']) {
+    if (typeof arg[k] === 'string') return arg[k].trim().split('\n')[0];
+  }
+  for (const v of Object.values(arg)) {
+    if (typeof v === 'string' && v.trim()) return v.trim().split('\n')[0];
+  }
+  return '';
+}
+function toolRow(name, arg) {
+  const d = el('details', 'tool done');
+  const s = el('summary');
+  s.appendChild(el('span', 'name', name));
+  s.appendChild(el('span', 'arg', argPreview(arg)));
+  s.appendChild(el('span', 'chev', '›'));
+  d.appendChild(s);
+  const out = el('div', 'out');
+  if (typeof arg === 'string') out.textContent = arg;
+  else if (arg != null) out.textContent = JSON.stringify(arg, null, 2);
+  d.appendChild(out);
+  return d;
+}
+function appendUser(t, images) {
+  const m = el('div', 'msg user');
+  const b = el('div', 'bubble');
+  if (t) b.appendChild(document.createTextNode(t));
+  for (const im of (images || []).filter(im => im.data)) {
+    const img = document.createElement('img');
+    img.className = 'attach';
+    img.src = 'data:' + (im.mimeType || 'image/jpeg') + ';base64,' + im.data;
+    b.appendChild(img);
+  }
+  m.appendChild(b);
+  logEl.appendChild(m);
+  scrollBottom();
+}
+function textOf(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter(c => c && c.type === 'text').map(c => c.text).join('\n');
+}
+function renderSnapshot(msgs) {
+  logEl.innerHTML = '';
+  if (!msgs.length) logEl.appendChild(el('div', 'empty', 'Nothing here yet. Say hello.'));
+  // §16 staleness: a choose block is only tappable on the very last message —
+  // anything after it (the choice, a follow-up turn) makes it plain text.
+  let lastAsst = -1;
+  msgs.forEach((m, i) => { if (m.role === 'assistant') lastAsst = i; });
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    const content = m.content || [];
+    if (m.role === 'user') {
+      const txt = textOf(content);
+      const arr = Array.isArray(content) ? content : [];
+      const imgs = arr.filter(c => c && c.type === 'image')
+                      .map(c => ({data: c.data, mimeType: c.mimeType || 'image/jpeg'}));
+      if (txt || imgs.length) appendUser(txt, imgs);
+    } else if (m.role === 'assistant') {
+      const msg = el('div', 'msg assistant');
+      const canChoose = (i === lastAsst && i === msgs.length - 1);
+      for (const c of content) {
+        if (c.type === 'text') {
+          const b = el('div', 'bubble');
+          if (!(canChoose && applyChooseBlock(b, c.text))) b.innerHTML = mdToHtml(c.text);
+          msg.appendChild(b);
+        }
+        else if (c.type === 'toolCall') msg.appendChild(toolRow(c.name, c.arguments || c.input));
+      }
+      if (msg.children.length) logEl.appendChild(msg);
+    } else if (m.role === 'toolResult') {
+      const txt = textOf(content);
+      if (txt) logEl.appendChild(toolRow('result', txt));
+    }
+  }
+  scrollBottom();
+}
+
+// ---- live streaming ----
+function onEvent(e) {
+  let ev;
+  try { ev = JSON.parse(e.data); } catch { return; }
+  const t = ev.type;
+  if (t === 'agent_start') {
+    setStatus(true);
+  } else if (t === 'agent_settled') {
+    maybeApplyChoices();   // §16: parse before resetStream eats the raw text
+    setStatus(false); resetStream();
+  } else if (t === 'message_start') {
+    const m = ev.message || {};
+    if (m.role === 'assistant') {
+      resetStream();
+    } else if (m.role === 'user') {
+      // Siri and Matrix share this session, so show their prompts too. Skip the
+      // echo of a prompt this page already drew.
+      const arr = Array.isArray(m.content) ? m.content : [];
+      const txt = textOf(m.content).trim();
+      const imgs = arr.filter(c => c && c.type === 'image')
+                      .map(c => ({data: c.data, mimeType: c.mimeType || 'image/jpeg'}));
+      const i = mine.indexOf(txt);
+      if (i >= 0) mine.splice(i, 1);
+      else if (txt || imgs.length) appendUser(txt, imgs);
+    }
+  } else if (t === 'message_end') {
+    endCaret();
+  } else if (t === 'message_update') {
+    const d = ev.assistantMessageEvent || {};
+    if (d.type === 'text_delta') {
+      appendDelta(d.delta); scrollBottom();
+    } else if (d.type === 'toolcall_start') {
+      curTool = toolRow(d.toolName, null);
+      curTool.classList.remove('done'); curTool.classList.add('running');
+      ensureMsg().appendChild(curTool); scrollBottom();
+    } else if (d.type === 'toolcall_end') {
+      if (curTool) { curTool.classList.remove('running'); curTool.classList.add('done'); }
+    }
+  } else if (t === 'tool_execution_update') {
+    if (curTool) {
+      const content = (ev.partialResult || {}).content || [];
+      const txt = content.map(c => c.text || '').join('');
+      const out = curTool.querySelector('.out');
+      if (txt && out) out.textContent = txt;
+    }
+  } else if (t === 'tool_execution_end') {
+    if (curTool) {
+      curTool.classList.remove('running');
+      curTool.classList.add(ev.isError ? 'error' : 'done');
+    }
+  } else if (t === 'web_attachments') {
+    renderAttachments(ev.files || []);
+  }
+}
+
+// §15: images the agent produced this turn (already saved under its out dir
+// and served by /media). Arrives after agent_settled, so it renders as its own
+// assistant row rather than into the just-finalized bubble.
+function renderAttachments(files) {
+  const imgs = files.filter(f => /\.(png|jpe?g|webp|gif)$/i.test(f.name || ''));
+  if (!imgs.length) return;
+  const m = el('div', 'msg assistant');
+  const row = el('div', 'atts');
+  for (const f of imgs) {
+    const a = document.createElement('a');
+    a.href = f.url + (TOKEN ? (f.url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : '');
+    a.target = '_blank';
+    a.rel = 'noopener';
+    const img = document.createElement('img');
+    img.className = 'att';
+    img.alt = f.name || 'attachment';
+    img.src = a.href;
+    a.appendChild(img);
+    row.appendChild(a);
+  }
+  m.appendChild(row);
+  logEl.appendChild(m);
+  scrollBottom();
+}
+
+// ---- networking ----
+function connectSSE() {
+  es = new EventSource(eventsUrl);
+  es.onmessage = onEvent;
+  es.onopen = async () => {
+    if (!firstOpen && !working) {
+      try { const msgs = await fetch('/messages', {headers:H}).then(r=>r.json()); renderSnapshot(msgs.messages || []); } catch {}
+    }
+    firstOpen = false;
+  };
+  es.onerror = () => setStatus('reconnecting…');
+}
+
+// ---- image attach ----
+attachBtn.onclick = () => fileInput.click();
+fileInput.onchange = async () => {
+  const file = fileInput.files && fileInput.files[0];
+  fileInput.value = '';   // allow re-selecting the same photo
+  if (!file) return;
+  try {
+    pendingImage = await shrinkImage(file);
+    renderPreview();
+  } catch (e) {
+    appendUser('⚠ Couldn\'t read that image.');
+  }
+};
+function renderPreview() {
+  preview.innerHTML = '';
+  if (!pendingImage) { preview.hidden = true; return; }
+  const img = document.createElement('img');
+  img.src = 'data:' + pendingImage.mimeType + ';base64,' + pendingImage.data;
+  const rm = document.createElement('button');
+  rm.className = 'rm'; rm.type = 'button'; rm.title = 'Remove'; rm.textContent = '✕';
+  rm.onclick = () => { pendingImage = null; renderPreview(); };
+  preview.appendChild(img); preview.appendChild(rm);
+  preview.hidden = false;
+}
+// Downscale + re-encode so a 3–8 MB phone photo becomes a ~200–500 KB base64
+// line over pi's stdin, with the data: prefix already stripped.
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 1568;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if (Math.max(w, h) > MAX) {
+          const s = MAX / Math.max(w, h);
+          w = Math.round(w * s); h = Math.round(h * s);
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        const url = c.toDataURL('image/jpeg', 0.8);
+        const m = url.match(/^data:([^;]+);base64,(.*)$/);
+        if (!m) return reject(new Error('bad data url'));
+        resolve({ type: 'image', data: m[2], mimeType: m[1] });
+      };
+      img.onerror = () => reject(new Error('decode failed'));
+      img.src = fr.result;
+    };
+    fr.onerror = () => reject(new Error('read failed'));
+    fr.readAsDataURL(file);
+  });
+}
+
+// ---- controls ----
+async function send() {
+  let text = input.value.trim();
+  const images = pendingImage ? [pendingImage] : [];
+  if (!text && !images.length) return;
+  if (!text && images.length) text = "What's in this image?";
+  input.value = '';
+  mine.push(text);
+  appendUser(text, images);
+  pendingImage = null;
+  renderPreview();
+  const body = { message: text };
+  if (images.length) body.images = images;
+  try {
+    const r = await fetch('/prompt', {
+      method:'POST',
+      headers:{...H, 'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const res = await r.json().catch(() => ({}));
+    if (res.error) appendUser('⚠ ' + res.error);
+  } catch { setStatus('reconnecting…'); }
+}
+document.getElementById('compose').addEventListener('submit', e => { e.preventDefault(); send(); });
+stopBtn.onclick = () => fetch('/abort', {method:'POST', headers:H}).catch(()=>{});
+modelSel.onchange = () => {
+  const [provider, modelId] = modelSel.value.split('|');
+  fetch('/model', {
+    method:'POST',
+    headers:{...H, 'Content-Type':'application/json'},
+    body: JSON.stringify({provider, modelId}),
+  }).catch(()=>{});
+};
+
+// ---- init ----
+(async function init() {
+  try {
+    const [st, models] = await Promise.all([
+      fetch('/state', {headers:H}).then(r=>r.json()),
+      fetch('/models', {headers:H}).then(r=>r.json()),
+    ]);
+    const list = models.models || models || [];
+    const curId = st.model ? (st.model.provider + '|' + st.model.id) : null;
+    for (const m of list) {
+      const opt = document.createElement('option');
+      opt.value = m.provider + '|' + (m.id || m.modelId);
+      opt.textContent = m.id || m.modelId;
+      if (opt.value === curId) opt.selected = true;
+      modelSel.appendChild(opt);
+    }
+    sessionName.textContent = st.sessionName || st.sessionId || '';
+    setStatus(st.isStreaming);
+  } catch (e) { setStatus(false); }
+  try {
+    const msgs = await fetch('/messages', {headers:H}).then(r=>r.json());
+    renderSnapshot(msgs.messages || []);
+  } catch {}
+  connectSSE();
+})();
+</script>
+</body>
+</html>

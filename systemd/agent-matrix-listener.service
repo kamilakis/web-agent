@@ -1,0 +1,15 @@
+[Unit]
+Description=Event-driven Matrix -> agent bridge
+After=network-online.target agent-session.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-matrix-listener
+Restart=always
+RestartSec=5
+# Restrict who can trigger the agent from Matrix, e.g.:
+#   Environment=AGENT_MATRIX_SENDERS=@you:example.org   # empty = anyone except the bot
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,934 @@
+#!/usr/bin/env python3
+"""Always-on pi agent session, driven over a FIFO, answers posted to Matrix.
+
+One persistent `pi --mode rpc` process holds a single long-lived session (fixed
+session id => full memory across restarts). Prompts arrive as lines on a FIFO;
+each prompt is sent to the agent, and when the agent settles, its final message
+is posted to the Matrix room via `matrix-notify`.
+
+Prompts are processed strictly one at a time: the next queued prompt is only
+sent after the previous one settles, so there is exactly one Matrix reply per
+command.
+
+Env overrides:
+  AGENT_SESSION_DIR   state dir (default ~/.local/share/agent-session)
+  AGENT_SESSION_WORKDIR   pi working dir (default ~/assistant)
+  AGENT_SESSION_ID    pi session id (default "siri-agent")
+  AGENT_PROVIDER      pi --provider (default "anthropic")
+  AGENT_MODEL         pi --model (default "claude-opus-4-8")
+  AGENT_QUIET_MATRIX  if "1", do not post; just log (for testing)
+"""
+import os
+import sys
+import json
+import time
+import queue
+import base64
+import signal
+import threading
+import subprocess
+import urllib.parse
+import mimetypes
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOME = os.path.expanduser("~")
+STATE = os.environ.get("AGENT_SESSION_DIR", f"{HOME}/.local/share/agent-session")
+WORKDIR = os.environ.get("AGENT_SESSION_WORKDIR", f"{HOME}/assistant")
+SESSION_ID = os.environ.get("AGENT_SESSION_ID", "siri-agent")
+PROVIDER = os.environ.get("AGENT_PROVIDER", "deepseek")
+MODEL = os.environ.get("AGENT_MODEL", "deepseek-v4-pro")
+QUIET = os.environ.get("AGENT_QUIET_MATRIX") == "1"
+
+# How long a synchronous caller (Siri) is allowed to wait before the answer
+# falls back to Matrix. Must be comfortably longer than the waiter's poll window.
+GRACE = int(os.environ.get("AGENT_SETTLE_GRACE", "30"))
+
+# Appended to every prompt so answers are sized for being spoken aloud.
+VOICE_HINT = os.environ.get(
+    "AGENT_VOICE_HINT",
+    "\n\n(Reply concisely — your answer is spoken back by Siri, so keep it to a "
+    "few short sentences.)",
+)
+
+FIFO = os.path.join(STATE, "in.fifo")
+TASKS = os.path.join(STATE, "tasks")
+LOG = os.path.join(STATE, "daemon.log")
+
+# Web dashboard (SSE + HTTP control plane). WireGuard-only by default.
+WEB_ENABLED = os.environ.get("AGENT_WEB_ENABLED", "1") != "0"
+WEB_HOST = os.environ.get("AGENT_WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.environ.get("AGENT_WEB_PORT", "8383"))
+WEB_TOKEN = os.environ.get("AGENT_WEB_TOKEN") or None
+INDEX_PATH = os.path.join(STATE, "web", "index.html")
+
+# Cap HTTP request bodies (a downscaled chat photo is a few hundred KB; this is
+# abuse protection, not a feature limit).
+MAX_BODY = int(os.environ.get("AGENT_WEB_MAX_BODY", str(12 * 1024 * 1024)))
+
+# §15 image editing: incoming images are saved here so the agent's tools (ffmpeg,
+# not the vision model) can edit them, and /media serves this tree back to the
+# dashboard. HINT_MARK marks the plumbing appended to the prompt; /messages and
+# the SSE broadcast strip everything from it so transcripts stay clean.
+ATTACH_DIR = os.environ.get("AGENT_ATTACH_DIR", os.path.join(STATE, "attachments"))
+HINT_MARK = "\n\n[attached files on disk: "
+IMG_EXT = {"image/jpeg": ".jpg", "image/png": ".png",
+           "image/webp": ".webp", "image/gif": ".gif"}
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+os.makedirs(os.path.join(ATTACH_DIR, "in"), exist_ok=True)
+os.makedirs(os.path.join(ATTACH_DIR, "out"), exist_ok=True)
+
+# Messages in a /messages snapshot, and the cap on one tool result's text.
+MSG_SNAPSHOT = int(os.environ.get("AGENT_WEB_MSG_LIMIT", "50"))
+TOOL_RESULT_CAP = int(os.environ.get("AGENT_WEB_TOOL_CAP", "2048"))
+
+# Vision model auto-selected when a picture is attached (deepseek-v4-pro is
+# text-only). Format "provider/modelId".
+VISION_MODEL = os.environ.get("AGENT_VISION_MODEL", "deepseek/deepseek-v4-flash-vision-exp")
+VISION_PROVIDER, VISION_MODEL_ID = VISION_MODEL.split("/", 1)
+
+# A dispatched prompt should produce agent_start within milliseconds. If none
+# arrives (an extension command that starts no run, or a failure after pi's
+# preflight already answered success) the pending flag would stall the FIFO
+# forever, so a watchdog clears it and a janitor thread re-checks periodically.
+DISPATCH_TIMEOUT = int(os.environ.get("AGENT_DISPATCH_TIMEOUT", "30"))
+JANITOR_INTERVAL = int(os.environ.get("AGENT_JANITOR_INTERVAL", "15"))
+MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
+
+os.makedirs(STATE, exist_ok=True)
+
+
+def log(*a):
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] " + " ".join(str(x) for x in a)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+    print(line, flush=True)
+
+
+def post_matrix(text):
+    text = (text or "").strip()
+    if not text:
+        text = "(the agent produced no text output)"
+    if QUIET:
+        log("MATRIX (suppressed):", text[:200].replace("\n", " "))
+        return
+    try:
+        subprocess.run(
+            ["matrix-notify"],
+            input=text.encode()[:30000],
+            check=True,
+            timeout=20,
+        )
+    except Exception as e:
+        log("matrix-notify FAILED:", e)
+
+
+class Daemon:
+    def __init__(self):
+        self.proc = None
+        self.q = queue.Queue()          # pending FIFO prompts (pid, prompt)
+        self.lock = threading.Lock()
+        self.busy = False               # a run is active (agent_start..agent_settled)
+        self.dispatch_pending = False   # a prompt was sent; awaiting agent_start/rejection
+        self.dispatch_deadline = None    # watchdog: when to give up on agent_start
+        self.pending_start_source = None  # source of the in-flight new-run dispatch
+        self.last_sent_source = None    # source of the most recent prompt sent
+        self.current_source = None      # source of the active run (set on agent_start)
+        self.current_prompt = None
+        self.current_id = None           # caller-provided id, for sync waiters
+        self.current_asked = None        # dispatch time, for task logs
+        self.cur_text = []              # text deltas of the in-flight message
+        self.last_text = None           # final assistant text of current run
+        self.last_web_message = None    # last web prompt (for steer-turned-run case)
+        self.last_web_asked = None
+        self.model_input = None         # current model's input types (None = unknown)
+        self.current_out_dir = None     # §15: this turn's out dir, scanned at settle
+        self.req_seq = 0
+        self.stdin_lock = threading.Lock()          # serialize writes to pi stdin
+        self.pending_requests = {}                  # rid -> (Event, box)
+        self.pending_requests_lock = threading.Lock()
+        self.cmd_seq = 0                            # command id counter
+        self.dispatch_map = {}                      # rid -> {source,pid,prompt}
+        self.clients = []                           # SSE client queues
+        self.clients_lock = threading.Lock()
+
+    # ---- pi process ----------------------------------------------------
+    def start_pi(self):
+        cmd = [
+            "pi", "--mode", "rpc",
+            "--provider", PROVIDER,
+            "--model", MODEL,
+            "--session-id", SESSION_ID,
+            "--session-dir", os.path.join(STATE, "sessions"),
+            "-n", "siri-agent",
+            "-a",  # trust project resources (MCP servers, skills) non-interactively
+        ]
+        log("starting pi:", " ".join(cmd), "cwd=", WORKDIR)
+        self.proc = subprocess.Popen(
+            cmd,
+            cwd=WORKDIR,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+            text=True,
+        )
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+
+    def _drain_stderr(self):
+        for line in self.proc.stderr:
+            log("pi.stderr:", line.rstrip())
+
+    def send_cmd(self, obj):
+        with self.stdin_lock:
+            self.proc.stdin.write(json.dumps(obj) + "\n")
+            self.proc.stdin.flush()
+
+    # ---- dispatch ------------------------------------------------------
+    def maybe_dispatch(self):
+        """Send the next queued FIFO prompt if no run is active or pending."""
+        with self.lock:
+            if self.dispatch_pending and self.dispatch_deadline \
+                    and time.time() > self.dispatch_deadline:
+                log("dispatch watchdog: no agent_start in", DISPATCH_TIMEOUT,
+                    "s; clearing stuck pending dispatch")
+                self.dispatch_pending = False
+                self.pending_start_source = None
+                self.dispatch_deadline = None
+            if self.busy or self.dispatch_pending:
+                return
+            try:
+                pid, prompt, attempts = self.q.get_nowait()
+            except queue.Empty:
+                return
+            source = "siri" if pid else "matrix"
+            self.dispatch_pending = True
+            self.dispatch_deadline = time.time() + DISPATCH_TIMEOUT
+            self.pending_start_source = source
+            self.last_sent_source = source
+            self.current_prompt = prompt
+            self.current_id = pid
+            self.current_asked = time.time()
+            self.cur_text = []
+            self.last_text = None
+            self.req_seq += 1
+            rid = f"fifo-{self.req_seq}"
+            self.dispatch_map[rid] = {"source": source, "pid": pid, "prompt": prompt,
+                                      "attempts": attempts}
+        log("PROMPT ->", prompt, "id=", pid)
+        # Voice hint only for Siri-originated prompts (those arrive with a caller
+        # id); Matrix-originated prompts get natural, unhinted answers.
+        hint = VOICE_HINT if pid else ""
+        self.send_cmd({"id": rid, "type": "prompt", "message": prompt + hint})
+
+    def web_prompt(self, message, images=None):
+        """Web sends a message. Always prompt + streamingBehavior:steer; pi
+        decides atomically whether it starts a run or steers the current one.
+
+        With images, the run must be on a vision model: auto-switch when a new
+        run is starting, and refuse to steer an image into a busy text-only run
+        (a steer cannot change the model of a run already in flight).
+
+        Images are also materialized to disk (§15) so the agent's tools —
+        ffmpeg, not the vision model — can edit them; the prompt carries the
+        on-disk paths and a per-turn output directory.
+        """
+        images = images or []
+        if images and not self._model_accepts_images():
+            with self.lock:
+                busy = self.busy or self.dispatch_pending
+            if busy:
+                return {"error": "the current model can't see pictures and a run "
+                                 "is in progress — stop it first, or switch to a "
+                                 "vision model"}
+            try:
+                self.model_set(VISION_PROVIDER, VISION_MODEL_ID)
+            except Exception as e:
+                log("auto-switch to vision model failed:", e)
+                return {"error": f"couldn't switch to vision model "
+                                 f"{VISION_MODEL_ID}: {e}"}
+        # §15: the turn id is assigned up front so the on-disk attachment names
+        # and the dispatch share it even though the save below is I/O.
+        with self.lock:
+            self.req_seq += 1
+            seq = self.req_seq
+        rid = f"web-{seq}"
+        in_paths, out_dir = [], None
+        if images:
+            with self.lock:
+                out_dir = self.current_out_dir or os.path.join(ATTACH_DIR, "out", rid)
+            in_paths = self._save_images(rid, images)
+            os.makedirs(out_dir, exist_ok=True)
+            full_message = message + self._attachment_hint(in_paths, out_dir)
+        else:
+            full_message = message
+        with self.lock:
+            starting = not self.busy and not self.dispatch_pending
+            self.last_sent_source = "web"
+            self.last_web_message = message
+            self.last_web_asked = time.time()
+            if starting:
+                self.dispatch_pending = True
+                self.dispatch_deadline = time.time() + DISPATCH_TIMEOUT
+                self.pending_start_source = "web"
+                self.current_prompt = message
+                self.current_id = None
+                self.current_asked = time.time()
+                self.cur_text = []
+                self.last_text = None
+                self.dispatch_map[rid] = {"source": "web", "pid": None,
+                                          "prompt": message, "attempts": 0}
+                if images:
+                    self.current_out_dir = out_dir
+        log("WEB PROMPT ->", message,
+            "steer" if not starting else "new",
+            f"images={len(images)}" if images else "")
+        cmd = {"id": rid, "type": "prompt", "message": full_message,
+               "streamingBehavior": "steer"}
+        if images:
+            cmd["images"] = images
+        self.send_cmd(cmd)
+        return {"status": "steered" if not starting else "accepted"}
+
+    def _save_images(self, rid, images):
+        """Materialize incoming base64 images to disk so the agent's tools
+        (ffmpeg, not the vision model) can edit them. Returns absolute paths."""
+        paths = []
+        for i, im in enumerate(images, 1):
+            ext = IMG_EXT.get(im.get("mimeType", ""), ".bin")
+            p = os.path.join(ATTACH_DIR, "in", f"{rid}-{i}{ext}")
+            try:
+                with open(p, "wb") as f:
+                    f.write(base64.b64decode(im["data"]))
+                paths.append(p)
+            except Exception as e:
+                log("failed to save attachment:", e)
+        return paths
+
+    def _attachment_hint(self, in_paths, out_dir):
+        return (HINT_MARK + ", ".join(in_paths) +
+                " — edit them with ffmpeg as the user asks. Save any output image "
+                "to " + out_dir + "/ with a descriptive filename; it is shown to "
+                "the user automatically.]")
+
+    def _collect_attachments(self, out_dir):
+        """List image files the agent produced in this turn's out dir (§15).
+        Images only for v1 (review #4); an empty or missing dir simply yields
+        no event."""
+        if not out_dir or not os.path.isdir(out_dir):
+            return []
+        base = os.path.basename(out_dir.rstrip("/"))
+        files = []
+        for name in sorted(os.listdir(out_dir)):
+            if os.path.splitext(name)[1].lower() not in IMG_EXTS:
+                continue
+            url = ("/media/out/" + urllib.parse.quote(base) + "/"
+                   + urllib.parse.quote(name))
+            files.append({"name": name, "url": url})
+        return files
+
+    def send_cmd_with_response(self, obj, timeout=15):
+        """Send a command and wait for its `response` event (get_state etc.)."""
+        with self.pending_requests_lock:
+            rid = f"cmd-{self.cmd_seq}"
+            self.cmd_seq += 1
+            evt = threading.Event()
+            box = {}
+            self.pending_requests[rid] = (evt, box)
+        self.send_cmd({**obj, "id": rid})
+        if not evt.wait(timeout):
+            with self.pending_requests_lock:
+                self.pending_requests.pop(rid, None)
+            raise TimeoutError(f"{obj.get('type')} timed out")
+        return box.get("resp")
+
+    def _refresh_model_input(self):
+        """Fetch the current model's input capability from get_state."""
+        try:
+            st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+            m = (st.get("data") or {}).get("model") or {}
+            self.model_input = m.get("input") or []
+            log("current model input:", self.model_input)
+        except Exception as e:
+            log("refresh model input failed:", e)
+            self.model_input = None   # unknown again; retry next time
+
+    def _model_accepts_images(self):
+        if self.model_input is None:
+            self._refresh_model_input()
+        return "image" in (self.model_input or [])
+
+    def model_set(self, provider, model_id):
+        """Switch model and refresh the cached input capability."""
+        resp = self.send_cmd_with_response({
+            "type": "set_model", "provider": provider, "modelId": model_id,
+        })
+        self._refresh_model_input()
+        return resp
+
+    def on_prompt_rejected(self, rid, err=None):
+        """pi rejected a prompt we thought would start a run.
+
+        Retries with backoff on a worker thread (never on the event loop) and
+        gives up after MAX_PROMPT_ATTEMPTS, telling whoever asked. A permanent
+        rejection — a model switched to a provider with no credentials, say —
+        would otherwise re-dispatch forever.
+        """
+        with self.lock:
+            info = self.dispatch_map.pop(rid, None)
+            self.dispatch_pending = False
+            self.pending_start_source = None
+            self.dispatch_deadline = None
+            if info is None:
+                return
+            if not self.busy:
+                self.current_prompt = None
+                self.current_id = None
+                self.current_asked = None
+                self.cur_text = []
+            attempts = (info.get("attempts") or 0) + 1
+        log("prompt rejected by pi:", err, "| attempt", attempts,
+            "| prompt:", info.get("prompt"))
+        if info["source"] == "web":
+            return      # the browser saw the failed response over SSE
+        if attempts >= MAX_PROMPT_ATTEMPTS:
+            msg = (f"The agent refused this prompt after {attempts} attempts: "
+                   f"{err or 'unknown error'}")
+            log("giving up on prompt after", attempts, "attempts")
+            if info["source"] == "siri" and info["pid"]:
+                rpath = os.path.join(STATE, "results", f"{info['pid']}.result")
+                os.makedirs(os.path.dirname(rpath), exist_ok=True)
+                with open(rpath, "w") as f:
+                    f.write(msg)
+            else:
+                threading.Thread(target=post_matrix,
+                                 args=(f"\U0001f916 {info['prompt']}\n\n{msg}",),
+                                 daemon=True).start()
+            self.maybe_dispatch()
+            return
+
+        def _retry():
+            time.sleep(min(9, 3 ** (attempts - 1)))
+            self.q.put((info["pid"], info["prompt"], attempts))
+            self.maybe_dispatch()
+
+        threading.Thread(target=_retry, daemon=True).start()
+
+    def settle(self):
+        with self.lock:
+            source = self.current_source
+            prompt = self.current_prompt
+            pid = self.current_id
+            answer = self.last_text
+            asked = self.current_asked or time.time()
+            out_dir = self.current_out_dir
+            self.current_out_dir = None
+            self.busy = False
+            self.dispatch_pending = False
+            self.dispatch_deadline = None
+            self.pending_start_source = None
+            self.current_source = None
+            self.current_prompt = None
+            self.current_id = None
+            self.current_asked = None
+        now = time.time()
+        answer_1line = (answer or "").replace("\n", " ")
+        log("SETTLED. prompt=", prompt, "source=", source,
+            "dur_s=", round(now - asked, 1),
+            "answer_len=", len(answer or ""),
+            "answer=", answer_1line[:400])
+        delivered = {"siri": "spoken", "matrix": "matrix", "web": "web"}.get(source, "unknown")
+        task_path = self.write_task_log(pid, prompt, answer, asked, now, delivered)
+        if source == "siri" and pid:
+            # Synchronous caller is polling for this file. If they consume it
+            # (delete) before GRACE elapses, no Matrix message is sent — the
+            # answer was already spoken. Otherwise fall back to Matrix.
+            rpath = os.path.join(STATE, "results", f"{pid}.result")
+            os.makedirs(os.path.dirname(rpath), exist_ok=True)
+            with open(rpath, "w") as f:
+                f.write(answer or "")
+
+            def _grace():
+                time.sleep(GRACE)
+                if os.path.exists(rpath):
+                    try:
+                        os.remove(rpath)
+                    except OSError:
+                        pass
+                    msg = f"🤖 {prompt}\n\n{answer}" if prompt else (answer or "")
+                    post_matrix(msg)
+                    with open(task_path, "a") as f:
+                        f.write(f"note: caller did not pick up within window; "
+                                f"delivered via Matrix at "
+                                f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
+
+            threading.Thread(target=_grace, daemon=True).start()
+        elif source == "matrix":
+            msg = f"🤖 {prompt}\n\n{answer}" if prompt else (answer or "")
+            threading.Thread(target=post_matrix, args=(msg,), daemon=True).start()
+        elif source == "web":
+            # §15: any image files the agent produced this turn go back to the
+            # dashboard. Empty/missing dir or non-images → no event (review #4).
+            files = self._collect_attachments(out_dir)
+            if files:
+                self.broadcast({"type": "web_attachments", "files": files})
+        self.maybe_dispatch()
+
+    def write_task_log(self, pid, prompt, answer, asked, settled_ts, delivered):
+        os.makedirs(TASKS, exist_ok=True)
+        if pid:
+            path = os.path.join(TASKS, f"{pid}.log")
+        else:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            path = os.path.join(TASKS, f"plain-{stamp}-{self.req_seq}.log")
+        with open(path, "w") as f:
+            f.write(f"prompt: {prompt}\n")
+            f.write(f"asked: {time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(asked))}\n")
+            f.write(f"settled: {time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(settled_ts))}\n")
+            f.write(f"duration_s: {round(settled_ts - asked, 1)}\n")
+            f.write(f"delivered: {delivered}\n")
+            f.write("answer:\n")
+            if answer:
+                f.write(answer.rstrip() + "\n")
+            else:
+                f.write("(no text)\n")
+        return path
+
+    # ---- event loop ----------------------------------------------------
+    def broadcast(self, obj):
+        line = json.dumps(obj)
+        with self.clients_lock:
+            clients = list(self.clients)
+        for q in clients:
+            try:
+                q.put_nowait(line)   # drop-slowest; never block the event loop
+            except queue.Full:
+                pass
+
+    def _clean_for_clients(self, ev):
+        """Strip the §15 attachment hint from user messages before they reach
+        SSE clients: the page dedups its own prompts via mine[], and the hint
+        would make the echoed text differ from what the user typed."""
+        m = ev.get("message") if isinstance(ev.get("message"), dict) else None
+        if ev.get("type") in ("message_start", "message_end") and m \
+                and m.get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, list):
+                newc, changed = [], False
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text" \
+                            and HINT_MARK in (c.get("text") or ""):
+                        newc.append({**c,
+                                     "text": c["text"].split(HINT_MARK)[0].rstrip()})
+                        changed = True
+                    elif isinstance(c, dict) and c.get("type") == "image" \
+                            and c.get("data"):
+                        # a chat photo is hundreds of KB of base64; the page that
+                        # sent it already rendered it, and reconnects re-fetch the
+                        # full snapshot — don't re-push it to every client
+                        newc.append({**c, "data": ""})
+                        changed = True
+                    else:
+                        newc.append(c)
+                if changed:
+                    return {**ev, "message": {**m, "content": newc}}
+        return ev
+
+    def read_events(self):
+        for line in self.proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = ev.get("type")
+            # cmd-* responses carry whole transcripts (a get_messages reply is
+            # ~170 KB); their HTTP caller is already correlated by id, so they
+            # must not also be pushed down every SSE stream. web-*/fifo-*
+            # prompt responses are small and let the UI report a rejection.
+            if not (t == "response" and str(ev.get("id") or "").startswith("cmd-")):
+                self.broadcast(self._clean_for_clients(ev))
+            if t == "message_start":
+                self.cur_text = []
+            elif t == "message_update":
+                ame = ev.get("assistantMessageEvent") or {}
+                if ame.get("type") == "text_delta":
+                    self.cur_text.append(ame.get("delta", ""))
+            elif t == "message_end":
+                buf = "".join(self.cur_text).strip()
+                if buf:
+                    self.last_text = buf
+                self.cur_text = []
+            elif t == "agent_start":
+                # pi emits agent_start for EVERY low-level run, so one prompt
+                # produces several: one per auto-retry, one per compaction
+                # continuation, one per queued-message continuation (see
+                # pi-agent-core agent-loop.js:runAgentLoopContinue, driven by
+                # agent-session.js:_runAgentPrompt). Only the FIRST one decides
+                # who owns the run. A later one must never re-attribute it or
+                # wipe the answer accumulated so far, or a Siri/Matrix answer
+                # is silently lost to the "web" branch in settle().
+                with self.lock:
+                    self.busy = True
+                    self.dispatch_pending = False
+                    self.dispatch_deadline = None
+                    if self.pending_start_source:
+                        self.current_source = self.pending_start_source
+                        self.pending_start_source = None
+                        self.dispatch_map.clear()
+                    elif self.current_source is None:
+                        # A run we never dispatched: a web prompt that landed in
+                        # the settle gap, where pi was already idle internally
+                        # and so treated the steer as a fresh prompt.
+                        self.current_source = "web"
+                        self.current_prompt = self.last_web_message
+                        self.current_id = None
+                        self.current_asked = self.last_web_asked or time.time()
+                        self.cur_text = []
+                        self.last_text = None
+                    # else: a continuation of the run already in flight. Keep
+                    # source, prompt, caller id and accumulated text untouched.
+            elif t == "agent_settled":
+                if self.busy:
+                    self.settle()
+                else:
+                    # A run we never attributed (an aborted dispatch, or an
+                    # extension command) must not leave the FIFO guard set.
+                    with self.lock:
+                        self.dispatch_pending = False
+                        self.pending_start_source = None
+                        self.dispatch_deadline = None
+                    self.maybe_dispatch()
+            elif t == "response":
+                rid = ev.get("id")
+                with self.pending_requests_lock:
+                    p = self.pending_requests.pop(rid, None)
+                if p:
+                    evt, box = p
+                    box["resp"] = ev
+                    evt.set()
+                if ev.get("command") == "prompt" and ev.get("success") is False:
+                    self.on_prompt_rejected(rid, ev.get("error"))
+            elif t == "extension_ui_request":
+                log("extension UI request:", ev.get("method"), ev.get("title"))
+                if ev.get("method") in ("select", "confirm", "input", "editor") \
+                        and not ev.get("timeout"):
+                    # A dialog with no timeout would hang the run forever; v1
+                    # auto-cancels. The web UI will answer these in v2.
+                    self.send_cmd({"type": "extension_ui_response",
+                                   "id": ev.get("id"), "cancelled": True})
+            elif t == "error":
+                log("pi error event:", ev.get("error"))
+        log("pi stdout closed; exiting event loop")
+
+    # ---- FIFO reader ---------------------------------------------------
+    def read_fifo(self):
+        if not os.path.exists(FIFO):
+            os.mkfifo(FIFO)
+        log("listening on FIFO:", FIFO)
+        while True:
+            with open(FIFO, "r") as f:      # blocks until a writer connects
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    pid, prompt = None, line
+                    if line.startswith("{"):
+                        try:
+                            obj = json.loads(line)
+                            pid = obj.get("id")
+                            if obj.get("prompt_b64"):
+                                prompt = base64.b64decode(obj["prompt_b64"]).decode("utf-8", "replace")
+                            elif obj.get("prompt"):
+                                prompt = obj["prompt"]
+                        except Exception:
+                            pass
+                    log("QUEUED <-", prompt, "id=", pid)
+                    self.q.put((pid, prompt, 0))
+                    self.maybe_dispatch()
+
+    def start_web(self):
+        if not WEB_ENABLED:
+            return
+        Handler.d = self
+        try:
+            srv = ThreadingHTTPServer((WEB_HOST, WEB_PORT), Handler)
+        except Exception as e:
+            log("web server FAILED to bind:", e)
+            return
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        log("web dashboard on http://%s:%d" % (WEB_HOST, WEB_PORT))
+
+    def janitor(self):
+        """Periodically re-check dispatch, so a stuck pending guard heals on its
+        own instead of waiting for the next FIFO prompt."""
+        while True:
+            time.sleep(JANITOR_INTERVAL)
+            try:
+                self.maybe_dispatch()
+            except Exception as e:
+                log("janitor error:", e)
+
+    def run(self):
+        self.start_pi()
+        threading.Thread(target=self.read_fifo, daemon=True).start()
+        threading.Thread(target=self.janitor, daemon=True).start()
+        self.start_web()
+        self.read_events()   # blocks until pi dies
+
+
+class Handler(BaseHTTPRequestHandler):
+    """HTTP + SSE control plane for the web dashboard."""
+    d = None                       # Daemon instance, wired in start_web()
+
+    def log_message(self, *args):  # silence per-request stderr noise
+        pass
+
+    # ---- helpers ----
+    def _route(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        return parsed.path, urllib.parse.parse_qs(parsed.query)
+
+    def _authorized(self, qs):
+        if not WEB_TOKEN:
+            return True
+        auth = (self.headers.get("Authorization") or "")
+        if auth.startswith("Bearer "):
+            auth = auth[7:]
+        if auth == WEB_TOKEN:
+            return True
+        return qs.get("token", [None])[0] == WEB_TOKEN
+
+    def _json(self, obj, status=200):
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _command(self, obj):
+        try:
+            resp = Handler.d.send_cmd_with_response(obj)
+        except TimeoutError as e:
+            self._json({"error": str(e)}, 504)
+            return
+        if resp.get("success") is False:
+            self._json({"error": resp.get("error") or "command failed"}, 502)
+            return
+        data = resp.get("data")
+        self._json(data if data is not None else {"ok": True})
+
+    def _messages(self):
+        try:
+            resp = Handler.d.send_cmd_with_response({"type": "get_messages"})
+        except TimeoutError as e:
+            self._json({"error": str(e)}, 504)
+            return
+        data = resp.get("data") or {}
+        msgs = data.get("messages", [])[-MSG_SNAPSHOT:]
+        # A tool result is a TOP-LEVEL message with role "toolResult", not a
+        # content block of that type. Replayed thinking dominates the payload
+        # (105 KB of a measured 169 KB) and the page does not show old
+        # reasoning; live thinking still streams over SSE.
+        out = []
+        for m in msgs:
+            content = m.get("content")
+            if not isinstance(content, list):
+                out.append(m)       # a user message may carry a plain string
+                continue
+            blocks = []
+            for x in content:
+                if not isinstance(x, dict):
+                    blocks.append(x)
+                    continue
+                if x.get("type") == "thinking":
+                    continue
+                if m.get("role") == "user" and x.get("type") == "text":
+                    # Strip plumbing the daemon appends (Siri voice hint, the
+                    # §15 attachment paths): the dashboard shows only what the
+                    # user typed.
+                    t = x.get("text") or ""
+                    if VOICE_HINT and t.endswith(VOICE_HINT):
+                        t = t[:-len(VOICE_HINT)].rstrip()
+                    if HINT_MARK in t:
+                        t = t.split(HINT_MARK)[0].rstrip()
+                    x = {**x, "text": t}
+                if m.get("role") == "toolResult" and x.get("type") == "text":
+                    t = x.get("text") or ""
+                    if len(t) > TOOL_RESULT_CAP:
+                        x = {**x, "text": t[:TOOL_RESULT_CAP] + "…"}
+                blocks.append(x)
+            out.append({**m, "content": blocks})
+        self._json({"messages": out})
+
+    def _media(self, subpath):
+        """Serve a file from ATTACH_DIR (§15). realpath containment defeats both
+        traversal and symlink escapes (review #5); GET only, auth as usual."""
+        root = os.path.realpath(ATTACH_DIR)
+        p = os.path.realpath(os.path.join(root, subpath))
+        if p != root and not p.startswith(root + os.sep):
+            self._json({"error": "not found"}, 404)
+            return
+        if not os.path.isfile(p):
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            with open(p, "rb") as f:
+                body = f.read()
+        except OSError:
+            self._json({"error": "not found"}, 404)
+            return
+        ctype = mimetypes.guess_type(p)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_index(self):
+        try:
+            with open(INDEX_PATH, "rb") as f:
+                body = f.read()
+        except FileNotFoundError:
+            body = (b"<html><body style='font-family:monospace'>"
+                    b"web-agent: index.html not created yet (step 5)</body></html>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- routes ----
+    def do_GET(self):
+        path, qs = self._route()
+        if not self._authorized(qs):
+            self._json({"error": "unauthorized"}, 401)
+            return
+        if path == "/":
+            self._serve_index()
+        elif path == "/events":
+            self._sse()
+        elif path == "/state":
+            self._command({"type": "get_state"})
+        elif path == "/messages":
+            self._messages()
+        elif path == "/models":
+            self._command({"type": "get_available_models"})
+        elif path.startswith("/media/"):
+            self._media(urllib.parse.unquote(path[len("/media/"):]))
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        path, qs = self._route()
+        if not self._authorized(qs):
+            self._json({"error": "unauthorized"}, 401)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:
+                self._json({"error": "body too large"}, 413)
+                return
+            body = json.loads(self.rfile.read(n).decode() or "{}")
+        except Exception:
+            body = {}
+        if path == "/prompt":
+            msg = (body.get("message") or "").strip()
+            images = body.get("images") or []
+            clean = []
+            for im in images:
+                if isinstance(im, dict) and im.get("type") == "image" and im.get("data"):
+                    clean.append({
+                        "type": "image",
+                        "data": str(im["data"]),
+                        "mimeType": im.get("mimeType") or "image/jpeg",
+                    })
+            if not msg and not clean:
+                self._json({"error": "message required"}, 400)
+                return
+            if clean and not msg:
+                msg = "What's in this image?"
+            self._json(Handler.d.web_prompt(msg, clean or None))
+        elif path == "/abort":
+            Handler.d.send_cmd({"type": "clear_queue"})
+            Handler.d.send_cmd({"type": "abort"})
+            self._json({"status": "aborting"})
+        elif path == "/model":
+            try:
+                resp = Handler.d.model_set(body.get("provider"), body.get("modelId"))
+            except TimeoutError as e:
+                self._json({"error": str(e)}, 504)
+                return
+            if resp.get("success") is False:
+                self._json({"error": resp.get("error") or "set_model failed"}, 502)
+                return
+            self._json(resp.get("data") if resp.get("data") is not None else {"ok": True})
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def _sse(self):
+        q = queue.Queue(maxsize=200)
+        d = Handler.d
+        with d.clients_lock:
+            d.clients.append(q)
+        log("SSE client connected:", self.client_address[0])
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    line = q.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                try:
+                    self.wfile.write(("data: " + line + "\n\n").encode())
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            with d.clients_lock:
+                if q in d.clients:
+                    d.clients.remove(q)
+            log("SSE client disconnected:", self.client_address[0])
+
+
+def main():
+    # Keep daemon.log bounded.
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 5 * 1024 * 1024:
+            os.replace(LOG, LOG + ".1")
+    except OSError:
+        pass
+
+    d = Daemon()
+
+    def _term(*_):
+        log("received termination signal")
+        try:
+            if d.proc:
+                d.proc.terminate()
+        finally:
+            sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGINT, _term)
+    d.run()
+    log("daemon exiting (pi process ended)")
+    sys.exit(1)   # let systemd restart us
+
+
+if __name__ == "__main__":
+    main()

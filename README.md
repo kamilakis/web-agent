@@ -1,0 +1,134 @@
+# web-agent
+
+A mobile-first web dashboard plus Siri and Matrix bridges for a persistent
+[pi](https://github.com/earendil-works/pi-coding-agent) coding-agent session —
+**one agent, three surfaces, one memory.**
+
+Talk to the same always-on agent from your phone in three ways: dictate to Siri
+and hear the answer spoken back, send a message in a Matrix room, or open a
+chat-style web dashboard with live streaming, image attach/edit and tappable
+choices. Everything lands in one long-lived session, so context follows you
+across surfaces.
+
+```
+ Siri (Shortcuts/SSH) ─┐                      ┌─ spoken answer, or Matrix fallback
+ Matrix room ──────────┼──▶ FIFO ──▶ daemon ──┼─▶ pi --mode rpc  (persistent session)
+ web dashboard ────────┘         ▲   │        └─ Matrix post / SSE stream
+                                 │   └─ HTTP + SSE control plane :8383
+                          Matrix listener (long-poll sync, event-driven)
+```
+
+## Features
+
+- **Persistent session** — one `pi --mode rpc` process with a fixed session id;
+  full memory across restarts, shared by every surface.
+- **Siri** — dictate a command over SSH; short answers are spoken back, long
+  ones fall back to Matrix.
+- **Matrix** — an event-driven listener (server-held long-poll sync, not busy
+  polling) forwards room messages to the agent; answers post back to the room.
+- **Web dashboard** — mobile-first, light/dark:
+  - live token streaming with tool-call rows (Claude Code style) and markdown
+  - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
+  - model switcher, status dot, reconnect with snapshot re-render
+  - **pictures**: attach from camera/roll (client-side downscale); the daemon
+    auto-switches to a vision model when the session model is text-only
+  - **image editing**: sent photos are saved to disk with their paths named in
+    the prompt, so the agent edits them with ffmpeg; results render inline
+  - **interactive choices**: the agent can end a reply with a `choose` block
+    that renders as tappable buttons
+
+## Requirements
+
+- [pi](https://github.com/earendil-works/pi-coding-agent) v0.85+ on the host
+- Python 3.10+ (stdlib only — no pip dependencies)
+- a Matrix account + room for the bridge (optional; skip it and use web + Siri)
+- WireGuard or another private network for the dashboard (it speaks plain HTTP
+  by design — no TLS inside the tunnel)
+
+## Install
+
+```bash
+git clone https://github.com/kamilakis/web-agent.git
+cd web-agent
+./install.sh
+```
+
+`install.sh` copies `bin/*` to `~/.local/bin`, the dashboard to
+`~/.local/share/agent-session/web/`, and the units to
+`~/.config/systemd/user/`, then enables and starts both services.
+
+### Post-install
+
+1. **Matrix bridge** (optional): create a config dir with three plain-text
+   files — `token`, `homeserver_url`, `room_id` — and point both services at it:
+
+   ```bash
+   mkdir -p ~/.config/web-agent/matrix
+   printf '%s' 'https://matrix.example.org' > ~/.config/web-agent/matrix/homeserver_url
+   printf '%s' '!roomid:example.org'         > ~/.config/web-agent/matrix/room_id
+   printf '%s' 'syt_yourtoken'               > ~/.config/web-agent/matrix/token
+   # in both unit files: Environment=AGENT_MATRIX_CONFIG=%h/.config/web-agent/matrix
+   systemctl --user daemon-reload && systemctl --user restart agent-matrix-listener.service
+   ```
+
+2. **Siri** (optional): a Shortcuts automation — Dictate Text → *Run Script Over
+   SSH* (`ssh <host> agent-task "Dictated Text"`, full path required) → Speak
+   Text ← Shell Script Result.
+
+3. **Dashboard**: open `http://<host>:8383` from a device on the private
+   network. `AGENT_WEB_HOST` (default `127.0.0.1`) controls the bind address —
+   set it to your VPN IP to reach the dashboard remotely.
+
+## Configuration
+
+All knobs are env vars (set them in the unit files). Defaults are generic —
+nothing personal is baked in.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `AGENT_PROVIDER` / `AGENT_MODEL` | `deepseek` / `deepseek-v4-pro` | pi provider and model |
+| `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
+| `AGENT_SESSION_ID` | `siri-agent` | session id = memory key; change to wipe |
+| `AGENT_TASK_WAIT` | `15` | seconds Siri holds the SSH call open |
+| `AGENT_SETTLE_GRACE` | `30` | seconds before an unanswered answer falls back to Matrix |
+| `AGENT_WEB_HOST` / `AGENT_WEB_PORT` | `127.0.0.1` / `8383` | dashboard bind address/port |
+| `AGENT_WEB_TOKEN` | unset | optional bearer token (`Authorization: Bearer`, or `?token=` for `EventSource`) |
+| `AGENT_WEB_ENABLED` | `1` | `0` disables the HTTP server |
+| `AGENT_ATTACH_DIR` | `~/.local/share/agent-session/attachments` | image editing scratch space, served by `/media` |
+| `AGENT_MATRIX_CONFIG` | `~/.config/web-agent/matrix` | dir with `token` / `homeserver_url` / `room_id` |
+| `AGENT_MATRIX_SENDERS` | *(empty)* | allowlist of Matrix senders; empty = anyone except the bot |
+| `AGENT_MATRIX_STATE_DIR` | `~/.local/state/agent-matrix-listener` | Matrix sync-token storage |
+
+## Security notes
+
+- The dashboard intentionally speaks plain HTTP — put it on a private network
+  (WireGuard/Tailscale) and bind `AGENT_WEB_HOST` to that interface only.
+- `AGENT_WEB_TOKEN` adds a bearer-token check on every route (including
+  `?token=` for `EventSource`, which cannot send headers).
+- `/media` serves only the attachments tree; `realpath` containment defeats
+  path traversal and symlink escapes. Request bodies are size-capped (413).
+- The Matrix listener only forwards text messages from `AGENT_MATRIX_SENDERS`
+  (never the bot's own messages, never edits), and never replays history: the
+  first sync advances until the stream token stops moving.
+- The daemon holds no credentials; Matrix credentials live in a plain config
+  dir you control.
+
+## How it works
+
+Three writers feed one FIFO that the daemon drains into a single pi session.
+The daemon derives each run's *source* (siri / matrix / web) from pi's own
+`agent_start` events — never from a guess — so answers always return to the
+surface that asked: Siri gets a result file (spoken) with a Matrix grace
+fallback, Matrix gets a room post, and the web dashboard streams everything
+over SSE. See [`docs/spec.md`](docs/spec.md) for the full design, including the
+run-state model, the vision-model auto-switch for image turns, and the
+interactive-choice convention ([`docs/choose-convention.md`](docs/choose-convention.md)).
+
+`docs/` also contains the design → external-LLM-review → build trail:
+[`spec-review.md`](docs/spec-review.md) (12 findings, all resolved) and
+[`review-qwen72b.md`](docs/review-qwen72b.md) (an independent Qwen2.5-72B
+review of the revised spec).
+
+## License
+
+[MIT](LICENSE)

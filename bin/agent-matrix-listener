@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Event-driven Matrix -> agent bridge.
+
+Watches the agent's Matrix room using the Sync API long-poll. The server holds
+each request open (up to TIMEOUT ms) and returns the instant an event arrives,
+so delivery is push-style — no busy polling, sub-second latency. Text messages
+from the user are handed to the always-on agent over its FIFO; the agent's
+reply returns to the same room (the daemon already posts to Matrix whenever a
+prompt has no synchronous Siri waiter, which is exactly this case).
+
+Env overrides:
+  AGENT_MATRIX_STATE_DIR   dir holding the last sync token
+                           (default ~/.local/state/agent-matrix-listener)
+  AGENT_MATRIX_SENDERS     comma-separated sender allowlist
+                           (default: empty = any sender except the bot)
+  AGENT_MATRIX_SELF_ID     override the bot's own user id (for testing/debugging)
+  AGENT_MATRIX_TIMEOUT     long-poll timeout in ms (default 30000)
+  AGENT_MATRIX_DRYRUN      "1" = log what would be forwarded, do not touch the FIFO
+"""
+import os
+import json
+import time
+import base64
+import urllib.parse
+import urllib.request
+import urllib.error
+import subprocess
+
+HOME = os.path.expanduser("~")
+CFG = os.environ.get("AGENT_MATRIX_CONFIG",
+                     os.path.expanduser("~/.config/web-agent/matrix"))
+STATE_DIR = os.environ.get(
+    "AGENT_MATRIX_STATE_DIR", os.path.expanduser("~/.local/state/agent-matrix-listener"))
+SINCE_FILE = os.path.join(STATE_DIR, "since.txt")
+SENDERS = os.environ.get("AGENT_MATRIX_SENDERS", "")
+TIMEOUT = int(os.environ.get("AGENT_MATRIX_TIMEOUT", "30000"))
+DRYRUN = os.environ.get("AGENT_MATRIX_DRYRUN") == "1"
+
+FIFO = os.path.expanduser("~/.local/share/agent-session/in.fifo")
+LOG = os.path.expanduser("~/.local/share/agent-session/matrix-listener.log")
+
+os.makedirs(STATE_DIR, exist_ok=True)
+
+
+def log(*a):
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] " + " ".join(str(x) for x in a)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    print(line, flush=True)
+
+
+def read_config(name):
+    with open(os.path.join(CFG, name)) as f:
+        return f.read().strip()
+
+
+def get_self_user_id(token, homeserver):
+    req = urllib.request.Request(
+        f"{homeserver}/_matrix/client/v3/account/whoami",
+        headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())["user_id"]
+
+
+def load_since():
+    try:
+        with open(SINCE_FILE) as f:
+            return f.read().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def save_since(token):
+    with open(SINCE_FILE, "w") as f:
+        f.write(token)
+
+
+def write_fifo(text):
+    """Deliver one prompt to the agent FIFO. Returns True if handed off."""
+    if DRYRUN:
+        log("DRYRUN would forward:", text[:200].replace("\n", " "))
+        return True
+    if not os.path.exists(FIFO):
+        return False
+    payload = json.dumps({"prompt_b64": base64.b64encode(text.encode()).decode()})
+    # The daemon's reader blocks in open(O_RDONLY); a blocking open(O_WRONLY)
+    # here is the rendezvous that connects them. `timeout` guards against a
+    # daemon that is down so we never hang forever.
+    try:
+        subprocess.run(
+            ["timeout", "5", "bash", "-c",
+             'printf "%s\n" "$1" > "$2"', "_", payload, FIFO],
+            check=True, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def sync(token, homeserver, since, timeout_ms):
+    q = {"timeout": str(timeout_ms)}
+    if since:
+        q["since"] = since
+    url = f"{homeserver}/_matrix/client/v3/sync?" + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=timeout_ms / 1000 + 30) as r:
+        return json.loads(r.read().decode())
+
+
+def main():
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 5 * 1024 * 1024:
+            os.replace(LOG, LOG + ".1")
+    except OSError:
+        pass
+
+    token = read_config("token")
+    homeserver = read_config("homeserver_url").rstrip("/")
+    room_id = read_config("room_id")
+
+    sid = os.environ.get("AGENT_MATRIX_SELF_ID")
+    self_id = sid if sid is not None else get_self_user_id(token, homeserver)
+    allow = [s.strip() for s in SENDERS.split(",") if s.strip()]
+    log("started. self=", self_id, "room=", room_id,
+        "allow=", allow or "(any non-self)", "dryrun=", DRYRUN)
+
+    since = load_since()
+
+    # First run: establish a baseline sync token without acting on history
+    # (otherwise every past message would be replayed into the agent). Keep
+    # syncing until next_batch stops advancing, because a brand-new sync
+    # stream can lag a few seconds behind very recent events.
+    if since is None:
+        log("first run: establishing sync baseline (ignoring history)")
+        nb = None
+        caught_up = False
+        while not caught_up:
+            try:
+                data = sync(token, homeserver, nb, 0)
+            except Exception as e:
+                log("initial sync error:", repr(e), "retrying in 5s")
+                time.sleep(5)
+                continue
+            new_nb = data.get("next_batch")
+            if not new_nb:
+                time.sleep(2)
+                continue
+            if new_nb == nb:
+                caught_up = True
+                nb = new_nb
+            else:
+                nb = new_nb
+                time.sleep(0.2)
+        save_since(nb)
+        since = nb
+        log("baseline established (history ignored)")
+
+    seen = set()
+
+    while True:
+        try:
+            data = sync(token, homeserver, since, TIMEOUT)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                log("FATAL: token rejected (401):", e.read().decode()[:200])
+                time.sleep(60)
+                continue
+            log("sync HTTP", e.code, "retrying in 10s")
+            time.sleep(10)
+            continue
+        except Exception as e:
+            log("sync error:", repr(e), "retrying in 5s")
+            time.sleep(5)
+            continue
+
+        next_batch = data.get("next_batch")
+        if not next_batch:
+            log("sync returned no next_batch; retrying in 5s")
+            time.sleep(5)
+            continue
+
+        room = ((data.get("rooms") or {}).get("join") or {}).get(room_id) or {}
+        events = (room.get("timeline") or {}).get("events") or []
+
+        delivery_failed = False
+        for ev in events:
+            if ev.get("type") != "m.room.message":
+                continue
+            content = ev.get("content") or {}
+            if content.get("msgtype") != "m.text":
+                continue
+            sender = ev.get("sender")
+            if sender == self_id:
+                continue
+            if allow and sender not in allow:
+                continue
+            body = (content.get("body") or "").strip()
+            if not body:
+                continue
+            # Edits are separate events; ignore them so editing a handled
+            # message doesn't retrigger the agent.
+            if (content.get("m.relates_to") or {}).get("rel_type") == "m.replace":
+                continue
+            eid = ev.get("event_id")
+            if eid and eid in seen:
+                continue
+            log("message from", sender, "->", body[:200].replace("\n", " "))
+            if write_fifo(body):
+                if eid:
+                    seen.add(eid)
+                    if len(seen) > 2000:
+                        seen.clear()
+            else:
+                log("FIFO write FAILED (daemon down?) — retrying without advancing sync token")
+                delivery_failed = True
+
+        if delivery_failed:
+            time.sleep(3)
+            continue  # do not advance since -> redelivers the failed message(s)
+
+        save_since(next_batch)
+        since = next_batch
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Siri -> always-on agent session, spoken answer.
+#
+#   ssh <host> agent-task "your dictated command"
+#
+# Sends the command to the persistent agent and waits for the answer so Siri can
+# speak it back. If the answer isn't ready within a short window (long tasks),
+# prints a fallback line instead and the agent posts the answer to Matrix.
+
+set -euo pipefail
+
+PROMPT="${*:-}"
+if [ -z "${PROMPT// }" ]; then
+    echo "No command given."
+    exit 1
+fi
+
+STATE="${AGENT_SESSION_DIR:-$HOME/.local/share/agent-session}"
+FIFO="$STATE/in.fifo"
+RESULTS="$STATE/results"
+# How long Siri is willing to hold the SSH call open for the answer.
+WAIT="${AGENT_TASK_WAIT:-15}"
+
+if [ ! -p "$FIFO" ]; then
+    echo "Agent session isn't running (start agent-session.service)."
+    exit 1
+fi
+
+# Unique id + base64 prompt (avoids any quoting/escaping issues on the FIFO).
+ID="$(date +%s%N)-$$"
+B64="$(printf '%s' "$PROMPT" | base64 -w0)"
+
+if ! timeout 5 bash -c 'printf "%s\n" "$1" > "$2"' \
+        _ "{\"id\":\"$ID\",\"prompt_b64\":\"$B64\"}" "$FIFO"; then
+    echo "Couldn't reach the agent session."
+    exit 1
+fi
+
+# Poll for the result file; the daemon deletes it only after GRACE, so our
+# reading it first and removing it marks the answer as "already delivered".
+END=$((SECONDS + WAIT))
+while [ $SECONDS -lt $END ]; do
+    if [ -f "$RESULTS/$ID.result" ]; then
+        ANSWER="$(cat "$RESULTS/$ID.result")"
+        rm -f "$RESULTS/$ID.result"
+        if [ -z "${ANSWER// }" ]; then
+            ANSWER="Done."
+        fi
+        # Note in the task log that the answer was spoken (for troubleshooting).
+        { printf 'note: consumed by caller (spoken) at %s\n' "$(date -Is)"; } \
+            >> "$STATE/tasks/$ID.log" 2>/dev/null || true
+        printf '%s\n' "$ANSWER"
+        exit 0
+    fi
+    sleep 0.3
+done
+
+# Still working — Matrix will carry the answer when it's done.
+echo "I'm still working on it — I'll send the answer to Matrix."

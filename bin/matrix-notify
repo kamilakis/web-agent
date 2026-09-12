@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Post a message to the Matrix room. Reads text from args or stdin.
+
+Reads credentials from a config dir containing
+  token, homeserver_url, room_id
+(plain text files). Default: ~/.config/web-agent/matrix,
+override with AGENT_MATRIX_CONFIG.
+
+Usage:
+  matrix-notify "some text"
+  echo "some text" | matrix-notify
+"""
+import os
+import sys
+import json
+import time
+import urllib.request
+import urllib.parse
+
+CFG = os.environ.get("AGENT_MATRIX_CONFIG",
+                     os.path.expanduser("~/.config/web-agent/matrix"))
+
+
+def read_config(name):
+    with open(os.path.join(CFG, name)) as f:
+        return f.read().strip()
+
+
+def send_matrix(token, homeserver, room_id, text):
+    txn_id = str(int(time.time() * 1000))
+    url = (
+        f"{homeserver}/_matrix/client/v3/rooms/"
+        f"{urllib.parse.quote(room_id, safe='')}/send/m.room.message/{txn_id}"
+    )
+    body = json.dumps({"msgtype": "m.text", "body": text}).encode()
+    req = urllib.request.Request(url, data=body, method="PUT")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read()
+
+
+def main():
+    if len(sys.argv) > 1:
+        text = " ".join(sys.argv[1:])
+    else:
+        text = sys.stdin.read()
+    text = text.strip()
+    if not text:
+        sys.exit(0)
+    send_matrix(
+        read_config("token"),
+        read_config("homeserver_url"),
+        read_config("room_id"),
+        text,
+    )
+
+
+if __name__ == "__main__":
+    main()
