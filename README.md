@@ -129,6 +129,16 @@ interactive-choice convention ([`docs/choose-convention.md`](docs/choose-convent
 [`review-qwen72b.md`](docs/review-qwen72b.md) (an independent Qwen2.5-72B
 review of the revised spec).
 
+## Acknowledgments
+
+web-agent is a thin layer around [pi](https://github.com/earendil-works/pi) —
+the agent, the tools, the session persistence and the whole interaction model
+are pi's. Its `--mode rpc` JSONL protocol turned out to be a complete embedding
+API: streaming deltas, per-tool progress, steering, abort, model switching and
+even headless UI dialogs are first-class protocol events, and the docs match
+the source line for line. This project is essentially a renderer and a few
+buttons on top of it. Thank you.
+
 ## License
 
 [MIT](LICENSE)
