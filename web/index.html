@@ -28,7 +28,6 @@
   --danger:#bc4c3c;
   --mono:ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --sbw:264px;           /* sessions sidebar width (drag to change) */
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -59,7 +58,7 @@ body {
 #app { display:flex; height:100dvh; }
 #content { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; }
 #sidebar {
-  flex:0 0 var(--sbw); display:flex; flex-direction:column;
+  flex:0 0 264px; display:flex; flex-direction:column;
   background:var(--surface); border-right:1px solid var(--border);
 }
 #sbResizer {
@@ -196,6 +195,16 @@ main {
 .msg.user .pcopy.done .ico-copy { display:none; }
 .msg.user .pcopy.done .ico-done { display:block; }
 @media (hover:none) { .msg.user .pcopy { opacity:1; } }   /* no hover on touch */
+/* copy-whole-response: bottom-left of the final assistant reply */
+.whole-copy {
+  align-self:flex-start; margin-top:2px;
+  display:inline-flex; align-items:center; gap:5px;
+  background:none; border:0; padding:3px 7px; border-radius:7px;
+  color:var(--dim); font:12px/1 var(--sans); cursor:pointer;
+}
+.whole-copy:hover { color:var(--accent); background:var(--surface); }
+.whole-copy.done { color:var(--ok); }
+.whole-copy svg { width:13px; height:13px; display:block; }
 .msg.assistant { align-items:stretch; }
 .bubble { white-space:pre-wrap; overflow-wrap:anywhere; }
 /* the person's turn is a bubble; Claude's turn is plain prose, as in the app */
@@ -475,6 +484,40 @@ function copyPlainText(text) {
   return ok;
 }
 
+// "Copy" under a finished assistant reply: gathers every text bubble's
+// markdown source (tool rows excluded, trailing choose fence stripped).
+function addWholeCopy(msg) {
+  if (!msg || msg.querySelector(':scope > .whole-copy')) return;
+  const parts = () => [...msg.querySelectorAll(':scope > .bubble')]
+    .map(b => b._raw || b.textContent || '').filter(s => s.trim());
+  if (!parts().length) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'whole-copy';
+  btn.title = 'Copy whole response';
+  btn.innerHTML = copyIcons() + '<span>Copy</span>';
+  btn.onclick = async () => {
+    const text = parts().join('\n\n')
+      .replace(/```choose[^\n]*\n[\s\S]*?```/gi, '').trim();
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch {}
+    if (!ok) ok = copyPlainText(text);
+    btn.classList.toggle('done', ok);
+    const lbl = btn.querySelector('span');
+    if (lbl) lbl.textContent = ok ? 'Copied' : 'Copy failed';
+    if (ok) setTimeout(() => {
+      btn.classList.remove('done');
+      if (lbl) lbl.textContent = 'Copy';
+    }, 1400);
+  };
+  msg.appendChild(btn);
+}
+
 // ---- sessions sidebar ----
 const sessList = document.getElementById('sessList');
 const sbNew = document.getElementById('sbNew');
@@ -625,44 +668,58 @@ sbArchive.onclick = () => doSwitch('archive');
 document.getElementById('bannerBack').onclick = returnToLive;
 
 // ---- sidebar resize (desktop) ----
+// Deliberately no setPointerCapture and no CSS custom property: both have
+// browser quirks that silently killed the first version. The width goes on
+// the sidebar as an inline style, listeners sit on window, and non-Pointer
+// Event browsers fall back to mouse events.
 const sbResizer = document.getElementById('sbResizer');
 const SBW_KEY = 'webagent:sb-width';
-function applySbW(w) {
-  const max = Math.min(560, window.innerWidth - 320);
-  w = Math.max(190, Math.min(max, w));
-  document.documentElement.style.setProperty('--sbw', Math.round(w) + 'px');
+const sbEl = document.getElementById('sidebar');
+function clampSbW(w) {
+  const max = Math.min(560, Math.max(320, window.innerWidth - 320));
+  return Math.round(Math.max(190, Math.min(max, w)));
 }
-function currentSbW() {
-  return parseFloat(getComputedStyle(document.documentElement)
-    .getPropertyValue('--sbw')) || 264;
+function applySbW(w) {
+  w = clampSbW(w);
+  sbEl.style.flex = '0 0 ' + w + 'px';
+  return w;
 }
 if (sbResizer) {
-  sbResizer.addEventListener('pointerdown', (e) => {
+  sbResizer.addEventListener('dragstart', e => e.preventDefault());
+  const startDrag = (e) => {
     if (window.matchMedia('(max-width:900px)').matches) return;
     e.preventDefault();
     const startX = e.clientX;
-    const startW = document.getElementById('sidebar').getBoundingClientRect().width;
+    const startW = sbEl.getBoundingClientRect().width;
+    let lastW = startW;
     document.body.classList.add('sb-resizing');
-    sbResizer.setPointerCapture?.(e.pointerId);
-    const move = (ev) => applySbW(startW + (ev.clientX - startX));
+    const move = (ev) => { lastW = applySbW(startW + (ev.clientX - startX)); };
     const up = () => {
       document.body.classList.remove('sb-resizing');
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
-      try { localStorage.setItem(SBW_KEY, String(Math.round(currentSbW()))); } catch {}
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      try { localStorage.setItem(SBW_KEY, String(lastW)); } catch {}
     };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
-  });
+    if (window.PointerEvent) {
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    } else {
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    }
+  };
+  sbResizer.addEventListener(window.PointerEvent ? 'pointerdown' : 'mousedown', startDrag);
   sbResizer.addEventListener('dblclick', () => {
-    applySbW(264);
+    sbEl.style.flex = '';   // back to the stylesheet default
     try { localStorage.removeItem(SBW_KEY); } catch {}
   });
   window.addEventListener('resize', () => {
     if (window.matchMedia('(max-width:900px)').matches) return;
-    applySbW(currentSbW());   // re-clamp against the new viewport
+    applySbW(sbEl.getBoundingClientRect().width);   // re-clamp
   });
   try {
     const w = parseInt(localStorage.getItem(SBW_KEY) || '', 10);
@@ -874,6 +931,7 @@ function renderSnapshot(msgs, readOnly) {
         if (c.type === 'text') {
           const b = el('div', 'bubble');
           if (!(canChoose && applyChooseBlock(b, c.text))) b.innerHTML = mdToHtml(c.text);
+          b._raw = c.text;
           msg.appendChild(b);
         }
         else if (c.type === 'toolCall') msg.appendChild(toolRow(c.name, c.arguments || c.input));
@@ -884,6 +942,8 @@ function renderSnapshot(msgs, readOnly) {
       if (txt) logEl.appendChild(toolRow('result', txt));
     }
   }
+  const lastAsstMsg = [...logEl.querySelectorAll('.msg.assistant')].pop();
+  if (lastAsstMsg) addWholeCopy(lastAsstMsg);
   scrollBottom();
 }
 
@@ -904,8 +964,10 @@ function onEvent(e) {
   if (t === 'agent_start') {
     setStatus(true);
   } else if (t === 'agent_settled') {
+    const finished = curBubble;
     maybeApplyChoices();   // §16: parse before resetStream eats the raw text
     setStatus(false); resetStream();
+    addWholeCopy(finished);
   } else if (t === 'message_start') {
     const m = ev.message || {};
     if (m.role === 'assistant') {
