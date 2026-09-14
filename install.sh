@@ -6,10 +6,13 @@ BIN="$PREFIX/.local/bin"
 STATE="$PREFIX/.local/share/agent-session"
 UNITS="$PREFIX/.config/systemd/user"
 
-mkdir -p "$BIN" "$STATE/web" "$UNITS"
+mkdir -p "$BIN" "$STATE/web" "$UNITS" "$STATE/attachments/site"
 install -m 755 bin/agent-session-daemon bin/agent-task \
                bin/agent-matrix-listener bin/matrix-notify "$BIN/"
 install -m 644 web/index.html "$STATE/web/index.html"
+# the dashboard's icons are referenced as /media/site/*, which the daemon serves
+# out of the attachments tree -- so they have to be installed, not just shipped
+install -m 644 web/site/* "$STATE/attachments/site/"
 install -m 644 systemd/*.service "$UNITS/"
 systemctl --user daemon-reload
 systemctl --user enable --now agent-session.service agent-matrix-listener.service
