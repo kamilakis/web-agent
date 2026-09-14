@@ -29,12 +29,14 @@ import threading
 import subprocess
 import urllib.parse
 import mimetypes
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
 STATE = os.environ.get("AGENT_SESSION_DIR", f"{HOME}/.local/share/agent-session")
 WORKDIR = os.environ.get("AGENT_SESSION_WORKDIR", f"{HOME}/assistant")
 SESSION_ID = os.environ.get("AGENT_SESSION_ID", "siri-agent")
+SESSION_NAME = os.environ.get("AGENT_SESSION_NAME", "siri-agent")
 PROVIDER = os.environ.get("AGENT_PROVIDER", "deepseek")
 MODEL = os.environ.get("AGENT_MODEL", "deepseek-v4-pro")
 QUIET = os.environ.get("AGENT_QUIET_MATRIX") == "1"
@@ -53,6 +55,8 @@ VOICE_HINT = os.environ.get(
 FIFO = os.path.join(STATE, "in.fifo")
 TASKS = os.path.join(STATE, "tasks")
 LOG = os.path.join(STATE, "daemon.log")
+SESSIONS_DIR = os.path.join(STATE, "sessions")
+ARCHIVE_DIR = os.path.join(STATE, "archive")
 
 # Web dashboard (SSE + HTTP control plane). WireGuard-only by default.
 WEB_ENABLED = os.environ.get("AGENT_WEB_ENABLED", "1") != "0"
@@ -95,6 +99,132 @@ JANITOR_INTERVAL = int(os.environ.get("AGENT_JANITOR_INTERVAL", "15"))
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
 os.makedirs(STATE, exist_ok=True)
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+
+def _text_of(content):
+    """Concatenated text of a message's content (string or block list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(x.get("text") or "" for x in content
+                        if isinstance(x, dict) and x.get("type") == "text")
+    return ""
+
+
+def _clean_user_text(t):
+    """Strip plumbing the daemon appends (Siri voice hint, attachment paths):
+    transcripts should show only what the user typed."""
+    if VOICE_HINT and t.endswith(VOICE_HINT):
+        t = t[:-len(VOICE_HINT)].rstrip()
+    if HINT_MARK in t:
+        t = t.split(HINT_MARK)[0].rstrip()
+    return t
+
+
+def session_meta(path, which):
+    """Sidebar metadata for one session file: id, display name, title (first
+    user text), user+assistant message count, timestamps. Streaming read; a
+    torn tail line (pi appending right now) is skipped."""
+    info = {"name": os.path.basename(path), "dir": which, "title": None,
+            "count": 0, "started": None, "id": None, "sessionName": None}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                t = e.get("type")
+                if t == "session":
+                    info["id"] = e.get("id")
+                    info["started"] = e.get("timestamp")
+                elif t == "session_info":
+                    info["sessionName"] = e.get("name")
+                elif t == "message":
+                    m = e.get("message") or {}
+                    if m.get("role") in ("user", "assistant"):
+                        info["count"] += 1
+                    if m.get("role") == "user" and not info["title"]:
+                        txt = _clean_user_text(_text_of(m.get("content"))).strip()
+                        if txt:
+                            info["title"] = txt[:120]
+        st = os.stat(path)
+        info["size"] = st.st_size
+        info["mtime"] = int(st.st_mtime)
+    except OSError:
+        return None
+    if not info["title"]:
+        info["title"] = info["sessionName"] or info["name"]
+    return info
+
+
+def session_messages(path, cap=4000):
+    """A past session file -> {messages: [...]} in the same shape as the live
+    /messages snapshot (thinking stripped, tool results capped, image blobs
+    dropped), so the dashboard renders history with the same renderer."""
+    out = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("type") != "message":
+                continue
+            m = e.get("message") or {}
+            role = m.get("role")
+            content = m.get("content")
+            if role == "user":
+                if isinstance(content, str):
+                    content = [{"type": "text",
+                                "text": _clean_user_text(content)}]
+                elif isinstance(content, list):
+                    blocks = []
+                    for x in content:
+                        if not isinstance(x, dict):
+                            continue
+                        if x.get("type") == "text":
+                            blocks.append({**x, "text": _clean_user_text(
+                                x.get("text") or "")})
+                        # image blobs are dropped: the page that sent them
+                        # rendered them already; /media keeps the originals
+                    content = blocks
+                else:
+                    continue
+            elif role == "assistant":
+                if isinstance(content, list):
+                    content = [x for x in content
+                               if isinstance(x, dict)
+                               and x.get("type") != "thinking"]
+                else:
+                    continue
+            elif role == "toolResult":
+                if isinstance(content, list):
+                    blocks = []
+                    for x in content:
+                        if not isinstance(x, dict) or x.get("type") != "text":
+                            continue   # image blobs are dropped: the live view
+                                       # does the same; /media keeps originals
+                        t2 = x.get("text") or ""
+                        if len(t2) > TOOL_RESULT_CAP:
+                            x = {**x, "text": t2[:TOOL_RESULT_CAP] + "…"}
+                        blocks.append(x)
+                    content = blocks
+                else:
+                    continue
+            else:
+                continue
+            out.append({"role": role, "content": content})
+            if len(out) >= cap:
+                break
+    return {"messages": out}
 
 
 def log(*a):
@@ -128,6 +258,7 @@ class Daemon:
         self.q = queue.Queue()          # pending FIFO prompts (pid, prompt)
         self.lock = threading.Lock()
         self.busy = False               # a run is active (agent_start..agent_settled)
+        self.switching = False           # a session switch is in progress
         self.dispatch_pending = False   # a prompt was sent; awaiting agent_start/rejection
         self.dispatch_deadline = None    # watchdog: when to give up on agent_start
         self.pending_start_source = None  # source of the in-flight new-run dispatch
@@ -158,8 +289,8 @@ class Daemon:
             "--provider", PROVIDER,
             "--model", MODEL,
             "--session-id", SESSION_ID,
-            "--session-dir", os.path.join(STATE, "sessions"),
-            "-n", "siri-agent",
+            "--session-dir", SESSIONS_DIR,
+            "-n", SESSION_NAME,
             "-a",  # trust project resources (MCP servers, skills) non-interactively
         ]
         log("starting pi:", " ".join(cmd), "cwd=", WORKDIR)
@@ -194,7 +325,7 @@ class Daemon:
                 self.dispatch_pending = False
                 self.pending_start_source = None
                 self.dispatch_deadline = None
-            if self.busy or self.dispatch_pending:
+            if self.busy or self.dispatch_pending or self.switching:
                 return
             try:
                 pid, prompt, attempts = self.q.get_nowait()
@@ -233,6 +364,8 @@ class Daemon:
         on-disk paths and a per-turn output directory.
         """
         images = images or []
+        if self.switching:
+            return {"error": "a session switch is in progress — try again in a moment"}
         if images and not self._model_accepts_images():
             with self.lock:
                 busy = self.busy or self.dispatch_pending
@@ -356,6 +489,131 @@ class Daemon:
         if self.model_input is None:
             self._refresh_model_input()
         return "image" in (self.model_input or [])
+
+    # ---- session switching --------------------------------------------
+    def craft_session_file(self):
+        """Write a fresh header-only session file, byte-identical to the first
+        line pi itself writes. RPC new_session would mint a random session id
+        and break the daemon's --session-id resume-on-restart, so a new
+        session means switch_session onto one of these (id stays SESSION_ID)."""
+        dt = datetime.now(timezone.utc)
+        iso = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+        fname = iso.replace(":", "-").replace(".", "-") + f"_{SESSION_ID}.jsonl"
+        path = os.path.join(SESSIONS_DIR, fname)
+        header = {"type": "session", "version": 3, "id": SESSION_ID,
+                  "timestamp": iso, "cwd": WORKDIR}
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(header) + "\n")
+        return path
+
+    def _abort_and_settle(self, timeout=8):
+        """Stop any in-flight run (clear_queue + abort, the Esc path) and wait
+        for agent_settled so the switch lands on an idle session."""
+        with self.lock:
+            active = self.busy or self.dispatch_pending
+        if not active:
+            return
+        self.send_cmd({"type": "clear_queue"})
+        self.send_cmd({"type": "abort"})
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                if not self.busy and not self.dispatch_pending:
+                    return
+            time.sleep(0.1)
+        log("switch: run did not settle after abort; forcing state reset")
+
+    def _reset_run_state(self):
+        with self.lock:
+            self.busy = False
+            self.dispatch_pending = False
+            self.dispatch_deadline = None
+            self.pending_start_source = None
+            self.current_source = None
+            self.current_prompt = None
+            self.current_id = None
+            self.current_asked = None
+            self.cur_text = []
+            self.last_text = None
+            self.current_out_dir = None
+            self.dispatch_map.clear()
+
+    def switch_to_new(self, archive):
+        """Switch pi onto a fresh session (see craft_session_file). The old
+        transcript is left in sessions/ (listed as a previous session) or
+        moved to ARCHIVE_DIR. Auto-aborts any in-flight run first."""
+        with self.lock:
+            if self.switching:
+                return {"error": "a session switch is already in progress"}
+            self.switching = True
+        try:
+            return self._switch_to_new(archive)
+        finally:
+            with self.lock:
+                self.switching = False
+            self.maybe_dispatch()   # queued prompts continue in the new session
+
+    def _switch_to_new(self, archive):
+        self._abort_and_settle()
+        self._reset_run_state()
+        try:
+            st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+        except TimeoutError as e:
+            return {"error": f"get_state before switch timed out: {e}"}
+        data = st.get("data") or {}
+        old_file = data.get("sessionFile")
+        if not old_file or not os.path.isfile(old_file):
+            return {"error": "could not determine the current session file"}
+        if archive and not data.get("messageCount"):
+            return {"error": "the current session is empty — nothing to archive"}
+        new_file = self.craft_session_file()
+        try:
+            resp = self.send_cmd_with_response(
+                {"type": "switch_session", "sessionPath": new_file}, timeout=30)
+        except TimeoutError:
+            # The response may be lost while the switch still landed; ask pi
+            # what session it is on now instead of guessing.
+            try:
+                st2 = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+                if (st2.get("data") or {}).get("sessionFile") != new_file:
+                    raise TimeoutError("switch_session never landed")
+                resp = {"success": True, "data": {}}
+            except TimeoutError as e:
+                return {"error": f"switch_session failed: {e} "
+                                 f"(the crafted file was left on disk)"}
+        rdata = resp.get("data") or {}
+        if resp.get("success") is False or rdata.get("cancelled"):
+            try:
+                os.remove(new_file)
+            except OSError:
+                pass
+            why = ("cancelled by an extension" if rdata.get("cancelled")
+                   else (resp.get("error") or "pi refused the switch"))
+            return {"error": f"switch failed: {why}"}
+        # A header-only file has no session_info entry; re-apply the display
+        # name so it survives restarts and shows in listings.
+        try:
+            self.send_cmd_with_response(
+                {"type": "set_session_name", "name": SESSION_NAME}, timeout=10)
+        except TimeoutError:
+            log("set_session_name after switch timed out (non-fatal)")
+        moved = None
+        if archive:
+            try:
+                os.makedirs(ARCHIVE_DIR, exist_ok=True)
+                dest = os.path.join(ARCHIVE_DIR, os.path.basename(old_file))
+                os.replace(old_file, dest)
+                moved = dest
+            except OSError as e:
+                log("archive move failed:", e)
+                return {"error": f"session switched, but the archive move "
+                                 f"failed: {e}"}
+        log("SESSION SWITCHED:", "archive" if archive else "new",
+            "old=", old_file, "new=", new_file)
+        self.broadcast({"type": "session_switched",
+                        "archived": bool(moved), "newFile": new_file})
+        return {"ok": True, "oldFile": old_file, "newFile": new_file,
+                "archived": moved}
 
     def model_set(self, provider, model_id):
         """Switch model and refresh the cached input capability."""
@@ -750,12 +1008,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Strip plumbing the daemon appends (Siri voice hint, the
                     # §15 attachment paths): the dashboard shows only what the
                     # user typed.
-                    t = x.get("text") or ""
-                    if VOICE_HINT and t.endswith(VOICE_HINT):
-                        t = t[:-len(VOICE_HINT)].rstrip()
-                    if HINT_MARK in t:
-                        t = t.split(HINT_MARK)[0].rstrip()
-                    x = {**x, "text": t}
+                    x = {**x, "text": _clean_user_text(x.get("text") or "")}
                 if m.get("role") == "toolResult" and x.get("type") == "text":
                     t = x.get("text") or ""
                     if len(t) > TOOL_RESULT_CAP:
@@ -763,6 +1016,51 @@ class Handler(BaseHTTPRequestHandler):
                 blocks.append(x)
             out.append({**m, "content": blocks})
         self._json({"messages": out})
+
+    def _sessions(self):
+        """List session files in sessions/ and archive/ with sidebar metadata.
+        The active one is flagged by comparing against get_state's sessionFile."""
+        try:
+            st = Handler.d.send_cmd_with_response({"type": "get_state"}, timeout=10)
+            active = os.path.basename((st.get("data") or {}).get("sessionFile") or "")
+        except TimeoutError:
+            active = ""
+        items = []
+        for which, root in (("sessions", SESSIONS_DIR), ("archive", ARCHIVE_DIR)):
+            try:
+                names = sorted(os.listdir(root))
+            except OSError:
+                continue
+            for n in names:
+                if not n.endswith(".jsonl"):
+                    continue
+                info = session_meta(os.path.join(root, n), which)
+                if not info:
+                    continue
+                info["active"] = (n == active)
+                items.append(info)
+        items.sort(key=lambda x: x.get("mtime") or 0, reverse=True)
+        self._json({"sessions": items})
+
+    def _session_read(self, qs):
+        """Read one past session as a messages snapshot. Basename + dir
+        allowlist only; realpath containment as a second belt."""
+        fname = (qs.get("file") or [""])[0]
+        which = (qs.get("dir") or ["sessions"])[0]
+        if which not in ("sessions", "archive") \
+                or fname != os.path.basename(fname) \
+                or not fname.endswith(".jsonl"):
+            self._json({"error": "bad request"}, 400)
+            return
+        root = os.path.realpath(SESSIONS_DIR if which == "sessions" else ARCHIVE_DIR)
+        path = os.path.realpath(os.path.join(root, fname))
+        if not path.startswith(root + os.sep) or not os.path.isfile(path):
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            self._json(session_messages(path))
+        except OSError as e:
+            self._json({"error": str(e)}, 500)
 
     def _media(self, subpath):
         """Serve a file from ATTACH_DIR (§15). realpath containment defeats both
@@ -816,6 +1114,10 @@ class Handler(BaseHTTPRequestHandler):
             self._command({"type": "get_state"})
         elif path == "/messages":
             self._messages()
+        elif path == "/sessions":
+            self._sessions()
+        elif path == "/session":
+            self._session_read(qs)
         elif path == "/models":
             self._command({"type": "get_available_models"})
         elif path.startswith("/media/"):
@@ -867,6 +1169,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": resp.get("error") or "set_model failed"}, 502)
                 return
             self._json(resp.get("data") if resp.get("data") is not None else {"ok": True})
+        elif path == "/newsession":
+            try:
+                self._json(Handler.d.switch_to_new(archive=False))
+            except Exception as e:
+                log("newsession error:", e)
+                self._json({"error": str(e)}, 500)
+        elif path == "/archive":
+            try:
+                self._json(Handler.d.switch_to_new(archive=True))
+            except Exception as e:
+                log("archive error:", e)
+                self._json({"error": str(e)}, 500)
         else:
             self._json({"error": "not found"}, 404)
 

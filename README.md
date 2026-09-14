@@ -36,6 +36,22 @@ across surfaces.
     the prompt, so the agent edits them with ffmpeg; results render inline
   - **interactive choices**: the agent can end a reply with a `choose` block
     that renders as tappable buttons
+- **Session history sidebar** — every transcript pi writes stays on disk;
+  the dashboard lists them (previous + archived), opens any of them
+  read-only, and can **archive the running session** or **start a new one**
+  without restarting the daemon:
+  - `GET /sessions` — list `sessions/` and `archive/` with first-prompt
+    title, message count and timestamps; the active file is flagged
+  - `GET /session?file=&dir=` — one transcript as a messages snapshot
+    (thinking stripped, tool results capped), rendered by the same snapshot
+    renderer as the live view; basename + dir allowlist, `realpath`
+    containment, image blobs dropped
+  - `POST /newsession` / `POST /archive` — switch pi onto a fresh
+    header-only session file (id preserved, so `--session-id` resume keeps
+    working) and optionally move the old transcript to `archive/`. A run in
+    flight is aborted first; a `session_switched` SSE event tells every open
+    tab to refresh. RPC `new_session` was deliberately **not** used: it mints
+    a random session id and would orphan the session on the next restart.
 
 ## Requirements
 
@@ -107,6 +123,8 @@ nothing personal is baked in.
   `?token=` for `EventSource`, which cannot send headers).
 - `/media` serves only the attachments tree; `realpath` containment defeats
   path traversal and symlink escapes. Request bodies are size-capped (413).
+  `/session` reads only `sessions/` and `archive/` by basename, with the same
+  `realpath` containment.
 - The Matrix listener only forwards text messages from `AGENT_MATRIX_SENDERS`
   (never the bot's own messages, never edits), and never replays history: the
   first sync advances until the stream token stops moving.
