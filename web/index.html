@@ -58,7 +58,7 @@ body {
 #app { display:flex; height:100dvh; }
 #content { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; }
 #sidebar {
-  flex:0 0 25vw; min-width:220px; max-width:420px;   /* ~1/4 of the window */
+  flex:0 0 35vw; min-width:220px; max-width:420px;   /* ~1/3 of the window */
   display:flex; flex-direction:column;
   background:var(--surface); border-right:1px solid var(--border);
 }
@@ -406,7 +406,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-14.6';
+const UI_VERSION = '2026-09-14.7';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
