@@ -411,6 +411,9 @@ footer {
 <script>
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
+// Bump when the page changes meaningfully; logged to the console at load so a
+// stale cached copy is immediately obvious.
+const UI_VERSION = '2026-09-14.5';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -686,8 +689,13 @@ function applySbW(w) {
 }
 if (sbResizer) {
   sbResizer.addEventListener('dragstart', e => e.preventDefault());
+  // Both pointer AND mouse event families, with a guard: the compatibility
+  // mousedown after a pointerdown re-enters here, and the second call is a
+  // no-op. Idempotent on purpose — this drag must work everywhere.
+  let dragging = false;
   const startDrag = (e) => {
-    if (window.matchMedia('(max-width:900px)').matches) return;
+    if (dragging || window.matchMedia('(max-width:900px)').matches) return;
+    dragging = true;
     e.preventDefault();
     const startX = e.clientX;
     const startW = sbEl.getBoundingClientRect().width;
@@ -695,6 +703,7 @@ if (sbResizer) {
     document.body.classList.add('sb-resizing');
     const move = (ev) => { lastW = applySbW(startW + (ev.clientX - startX)); };
     const up = () => {
+      dragging = false;
       document.body.classList.remove('sb-resizing');
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -703,16 +712,14 @@ if (sbResizer) {
       window.removeEventListener('mouseup', up);
       try { localStorage.setItem(SBW_KEY, String(lastW)); } catch {}
     };
-    if (window.PointerEvent) {
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', up);
-      window.addEventListener('pointercancel', up);
-    } else {
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
-    }
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
   };
-  sbResizer.addEventListener(window.PointerEvent ? 'pointerdown' : 'mousedown', startDrag);
+  sbResizer.addEventListener('pointerdown', startDrag);
+  sbResizer.addEventListener('mousedown', startDrag);
   sbResizer.addEventListener('dblclick', () => {
     sbEl.style.flex = '';   // back to the stylesheet default
     try { localStorage.removeItem(SBW_KEY); } catch {}
@@ -1140,6 +1147,7 @@ modelSel.onchange = () => {
 };
 
 // ---- init ----
+console.info('[web-agent] dashboard ui ' + UI_VERSION);
 (async function init() {
   try {
     const [st, models] = await Promise.all([
