@@ -58,16 +58,10 @@ body {
 #app { display:flex; height:100dvh; }
 #content { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; }
 #sidebar {
-  flex:0 0 264px; display:flex; flex-direction:column;
+  flex:0 0 25vw; min-width:220px; max-width:420px;   /* ~1/4 of the window */
+  display:flex; flex-direction:column;
   background:var(--surface); border-right:1px solid var(--border);
 }
-#sbResizer {
-  flex:0 0 6px; cursor:col-resize; touch-action:none;
-  background:transparent; transition:background .12s;
-}
-#sbResizer:hover, body.sb-resizing #sbResizer { background:var(--accent); opacity:.35; }
-body.sb-resizing { cursor:col-resize; user-select:none; -webkit-user-select:none; }
-@media (max-width:900px) { #sbResizer { display:none; } }
 .sb-head {
   padding:calc(env(safe-area-inset-top) + 12px) 12px 10px;
   display:flex; flex-direction:column; gap:8px;
@@ -365,7 +359,6 @@ footer {
   </div>
   <div id="sessList" class="sb-list"></div>
 </aside>
-<div id="sbResizer" title="Drag to resize · double-click to reset"></div>
 <div id="content">
 <header>
   <button id="sbToggle" class="sb-toggle" type="button" title="Sessions" aria-label="Sessions">☰</button>
@@ -413,7 +406,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-14.5';
+const UI_VERSION = '2026-09-14.6';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -670,69 +663,8 @@ sbNew.onclick = () => doSwitch('newsession');
 sbArchive.onclick = () => doSwitch('archive');
 document.getElementById('bannerBack').onclick = returnToLive;
 
-// ---- sidebar resize (desktop) ----
-// Deliberately no setPointerCapture and no CSS custom property: both have
-// browser quirks that silently killed the first version. The width goes on
-// the sidebar as an inline style, listeners sit on window, and non-Pointer
-// Event browsers fall back to mouse events.
-const sbResizer = document.getElementById('sbResizer');
-const SBW_KEY = 'webagent:sb-width';
-const sbEl = document.getElementById('sidebar');
-function clampSbW(w) {
-  const max = Math.min(560, Math.max(320, window.innerWidth - 320));
-  return Math.round(Math.max(190, Math.min(max, w)));
-}
-function applySbW(w) {
-  w = clampSbW(w);
-  sbEl.style.flex = '0 0 ' + w + 'px';
-  return w;
-}
-if (sbResizer) {
-  sbResizer.addEventListener('dragstart', e => e.preventDefault());
-  // Both pointer AND mouse event families, with a guard: the compatibility
-  // mousedown after a pointerdown re-enters here, and the second call is a
-  // no-op. Idempotent on purpose — this drag must work everywhere.
-  let dragging = false;
-  const startDrag = (e) => {
-    if (dragging || window.matchMedia('(max-width:900px)').matches) return;
-    dragging = true;
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sbEl.getBoundingClientRect().width;
-    let lastW = startW;
-    document.body.classList.add('sb-resizing');
-    const move = (ev) => { lastW = applySbW(startW + (ev.clientX - startX)); };
-    const up = () => {
-      dragging = false;
-      document.body.classList.remove('sb-resizing');
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      window.removeEventListener('pointercancel', up);
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      try { localStorage.setItem(SBW_KEY, String(lastW)); } catch {}
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  };
-  sbResizer.addEventListener('pointerdown', startDrag);
-  sbResizer.addEventListener('mousedown', startDrag);
-  sbResizer.addEventListener('dblclick', () => {
-    sbEl.style.flex = '';   // back to the stylesheet default
-    try { localStorage.removeItem(SBW_KEY); } catch {}
-  });
-  window.addEventListener('resize', () => {
-    if (window.matchMedia('(max-width:900px)').matches) return;
-    applySbW(sbEl.getBoundingClientRect().width);   // re-clamp
-  });
-  try {
-    const w = parseInt(localStorage.getItem(SBW_KEY) || '', 10);
-    if (Number.isFinite(w) && w > 0) applySbW(w);
-  } catch {}
-}
+// The sidebar is a fixed 25vw (min 220px, max 420px) — no JS resize.
+
 const preview = document.getElementById('preview');
 let working = false;
 let curBubble = null;   // streaming assistant message container
