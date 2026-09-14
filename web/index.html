@@ -117,6 +117,27 @@ main {
   padding:10px 12px; margin:10px 0; overflow-x:auto; white-space:pre;
 }
 .bubble pre code { background:none; padding:0; font-size:inherit; }
+/* Code blocks get a copy button pinned to the top-right. Buttons are part of
+   the generated markup and a single delegated listener handles the clicks, so
+   nothing has to be re-bound as the reply streams and the bubble re-renders. */
+.codeblock { position:relative; }
+.codeblock pre { padding-right:44px; }
+.codeblock .copy {
+  position:absolute; top:6px; right:6px;
+  display:flex; align-items:center; justify-content:center;
+  width:26px; height:26px; padding:0;
+  background:var(--elev); color:var(--dim);
+  border:1px solid var(--border); border-radius:7px; cursor:pointer;
+  opacity:0; transition:opacity .12s, color .12s, border-color .12s;
+}
+.codeblock:hover .copy, .codeblock .copy:focus-visible { opacity:1; }
+.codeblock .copy:hover { color:var(--accent); border-color:var(--accent); }
+.codeblock .copy.done { opacity:1; color:var(--ok); border-color:var(--ok); }
+.codeblock .copy svg { width:14px; height:14px; display:block; }
+.codeblock .copy .ico-done { display:none; }
+.codeblock .copy.done .ico-copy { display:none; }
+.codeblock .copy.done .ico-done { display:block; }
+@media (hover:none) { .codeblock .copy { opacity:1; } }   /* no hover on touch */
 .bubble .h { display:block; font-weight:650; margin:14px 0 3px; }
 .bubble .h:first-child { margin-top:0; }
 .bubble a { color:var(--accent); }
@@ -273,6 +294,36 @@ const statusText = document.getElementById('statusText');
 const sessionName = document.getElementById('sessionName');
 const attachBtn = document.getElementById('attachBtn');
 const fileInput = document.getElementById('fileInput');
+
+// Copy buttons are generated into the markdown, so one delegated listener
+// covers every block, including ones added while a reply is still streaming.
+// navigator.clipboard is unavailable over plain http (not a secure context --
+// this dashboard is http://<vpn-ip>:8383), so fall back to a selection copy.
+logEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.codeblock .copy');
+  if (!btn) return;
+  const pre = btn.closest('.codeblock').querySelector('pre');
+  if (!pre) return;
+  const text = pre.textContent;
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {}
+  if (!ok) {
+    const r = document.createRange();
+    r.selectNodeContents(pre);
+    const sel = getSelection();
+    sel.removeAllRanges(); sel.addRange(r);
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    sel.removeAllRanges();
+  }
+  btn.classList.toggle('done', ok);
+  btn.title = ok ? 'Copied' : 'Copy failed';
+  if (ok) setTimeout(() => { btn.classList.remove('done'); btn.title = 'Copy'; }, 1200);
+});
 const preview = document.getElementById('preview');
 let working = false;
 let curBubble = null;   // streaming assistant message container
@@ -327,8 +378,22 @@ function mdToHtml(src) {
   s = s.replace(/^(\s*)[-*]\s+/gm, '$1• ');
   s = s.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g,
                 '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => '<pre><code>' + blocks[+i] + '</code></pre>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) =>
+                '<div class="codeblock"><pre><code>' + blocks[+i] +
+                '</code></pre>' + copyBtnHtml() + '</div>');
   return s;
+}
+// Two icons; CSS swaps them so the tick costs no DOM churn on click.
+function copyBtnHtml() {
+  return '<button type="button" class="copy" title="Copy" aria-label="Copy code">'
+    + '<svg class="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<rect x="9" y="9" width="13" height="13" rx="2"/>'
+    + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+    + '<svg class="ico-done" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M20 6 9 17l-5-5"/></svg>'
+    + '</button>';
 }
 function appendDelta(delta) {
   const t = ensureTxt();
