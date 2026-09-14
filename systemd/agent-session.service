@@ -17,6 +17,9 @@ Environment=PI_CODING_AGENT=
 Environment=PI_MODEL=
 Environment=PI_PROVIDER=
 Environment=PI_REASONING_LEVEL=
+# Default agent model (vision-capable, so the daemon never auto-switches on photos)
+Environment=AGENT_PROVIDER=huggingface
+Environment=AGENT_MODEL=zai-org/GLM-5.3-Flash
 
 [Install]
 WantedBy=default.target
