@@ -28,6 +28,7 @@
   --danger:#bc4c3c;
   --mono:ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --sbw:264px;           /* sessions sidebar width (drag to change) */
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -58,9 +59,16 @@ body {
 #app { display:flex; height:100dvh; }
 #content { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; }
 #sidebar {
-  flex:0 0 264px; display:flex; flex-direction:column;
+  flex:0 0 var(--sbw); display:flex; flex-direction:column;
   background:var(--surface); border-right:1px solid var(--border);
 }
+#sbResizer {
+  flex:0 0 6px; cursor:col-resize; touch-action:none;
+  background:transparent; transition:background .12s;
+}
+#sbResizer:hover, body.sb-resizing #sbResizer { background:var(--accent); opacity:.35; }
+body.sb-resizing { cursor:col-resize; user-select:none; -webkit-user-select:none; }
+@media (max-width:900px) { #sbResizer { display:none; } }
 .sb-head {
   padding:calc(env(safe-area-inset-top) + 12px) 12px 10px;
   display:flex; flex-direction:column; gap:8px;
@@ -89,8 +97,8 @@ body {
 .sb-item:hover { background:var(--elev); }
 .sb-item.active { background:var(--elev); box-shadow:inset 0 0 0 1px var(--accent); }
 .sb-item.viewing { box-shadow:inset 0 0 0 1.5px var(--accent); }
-.sb-item .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.sb-item .m { display:flex; gap:7px; font:10.5px/1.3 var(--mono); color:var(--dim); }
+.sb-item .t { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sb-item .m { display:flex; gap:7px; font:10.5px/1.3 var(--mono); color:var(--dim); white-space:nowrap; overflow:hidden; }
 .sb-item .m .badge { color:var(--ok); font-weight:700; }
 .sb-toggle {
   display:none; width:30px; height:30px; padding:0;
@@ -168,7 +176,26 @@ main {
   padding:18px 16px 10px;
 }
 .msg { display:flex; flex-direction:column; margin:0 0 20px; }
-.msg.user { align-items:flex-end; }
+.msg.user {
+  flex-direction:row; justify-content:flex-end;
+  align-items:flex-start; gap:7px;
+}
+/* copy button beside the person's prompt, same pattern as code blocks */
+.msg.user .pcopy {
+  flex:0 0 auto; width:26px; height:26px; padding:0; margin-top:2px;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--elev); color:var(--dim);
+  border:1px solid var(--border); border-radius:7px; cursor:pointer;
+  opacity:0; transition:opacity .12s, color .12s, border-color .12s;
+}
+.msg.user:hover .pcopy, .msg.user .pcopy:focus-visible { opacity:1; }
+.msg.user .pcopy:hover { color:var(--accent); border-color:var(--accent); }
+.msg.user .pcopy.done { opacity:1; color:var(--ok); border-color:var(--ok); }
+.msg.user .pcopy svg { width:14px; height:14px; display:block; }
+.msg.user .pcopy .ico-done { display:none; }
+.msg.user .pcopy.done .ico-copy { display:none; }
+.msg.user .pcopy.done .ico-done { display:block; }
+@media (hover:none) { .msg.user .pcopy { opacity:1; } }   /* no hover on touch */
 .msg.assistant { align-items:stretch; }
 .bubble { white-space:pre-wrap; overflow-wrap:anywhere; }
 /* the person's turn is a bubble; Claude's turn is plain prose, as in the app */
@@ -329,6 +356,7 @@ footer {
   </div>
   <div id="sessList" class="sb-list"></div>
 </aside>
+<div id="sbResizer" title="Drag to resize · double-click to reset"></div>
 <div id="content">
 <header>
   <button id="sbToggle" class="sb-toggle" type="button" title="Sessions" aria-label="Sessions">☰</button>
@@ -392,6 +420,22 @@ const fileInput = document.getElementById('fileInput');
 // navigator.clipboard is unavailable over plain http (not a secure context --
 // this dashboard is http://<vpn-ip>:8383), so fall back to a selection copy.
 logEl.addEventListener('click', async (e) => {
+  // copy button beside a user prompt
+  const pbtn = e.target.closest('.msg.user .pcopy');
+  if (pbtn) {
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(pbtn._text || '');
+        ok = true;
+      }
+    } catch {}
+    if (!ok) ok = copyPlainText(pbtn._text);
+    pbtn.classList.toggle('done', ok);
+    pbtn.title = ok ? 'Copied' : 'Copy failed';
+    if (ok) setTimeout(() => { pbtn.classList.remove('done'); pbtn.title = 'Copy prompt'; }, 1200);
+    return;
+  }
   const btn = e.target.closest('.codeblock .copy');
   if (!btn) return;
   const pre = btn.closest('.codeblock').querySelector('pre');
@@ -416,6 +460,20 @@ logEl.addEventListener('click', async (e) => {
   btn.title = ok ? 'Copied' : 'Copy failed';
   if (ok) setTimeout(() => { btn.classList.remove('done'); btn.title = 'Copy'; }, 1200);
 });
+
+// Plain-text copy fallback (prompts aren't in the DOM to select): a hidden
+// textarea, select, execCommand — the path iOS Safari takes over plain http.
+function copyPlainText(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text || '';
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
 
 // ---- sessions sidebar ----
 const sessList = document.getElementById('sessList');
@@ -565,6 +623,52 @@ async function doSwitch(kind) {
 sbNew.onclick = () => doSwitch('newsession');
 sbArchive.onclick = () => doSwitch('archive');
 document.getElementById('bannerBack').onclick = returnToLive;
+
+// ---- sidebar resize (desktop) ----
+const sbResizer = document.getElementById('sbResizer');
+const SBW_KEY = 'webagent:sb-width';
+function applySbW(w) {
+  const max = Math.min(560, window.innerWidth - 320);
+  w = Math.max(190, Math.min(max, w));
+  document.documentElement.style.setProperty('--sbw', Math.round(w) + 'px');
+}
+function currentSbW() {
+  return parseFloat(getComputedStyle(document.documentElement)
+    .getPropertyValue('--sbw')) || 264;
+}
+if (sbResizer) {
+  sbResizer.addEventListener('pointerdown', (e) => {
+    if (window.matchMedia('(max-width:900px)').matches) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = document.getElementById('sidebar').getBoundingClientRect().width;
+    document.body.classList.add('sb-resizing');
+    sbResizer.setPointerCapture?.(e.pointerId);
+    const move = (ev) => applySbW(startW + (ev.clientX - startX));
+    const up = () => {
+      document.body.classList.remove('sb-resizing');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      try { localStorage.setItem(SBW_KEY, String(Math.round(currentSbW()))); } catch {}
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
+  sbResizer.addEventListener('dblclick', () => {
+    applySbW(264);
+    try { localStorage.removeItem(SBW_KEY); } catch {}
+  });
+  window.addEventListener('resize', () => {
+    if (window.matchMedia('(max-width:900px)').matches) return;
+    applySbW(currentSbW());   // re-clamp against the new viewport
+  });
+  try {
+    const w = parseInt(localStorage.getItem(SBW_KEY) || '', 10);
+    if (Number.isFinite(w) && w > 0) applySbW(w);
+  } catch {}
+}
 const preview = document.getElementById('preview');
 let working = false;
 let curBubble = null;   // streaming assistant message container
@@ -625,16 +729,18 @@ function mdToHtml(src) {
   return s;
 }
 // Two icons; CSS swaps them so the tick costs no DOM churn on click.
-function copyBtnHtml() {
-  return '<button type="button" class="copy" title="Copy" aria-label="Copy code">'
-    + '<svg class="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+function copyIcons() {
+  return '<svg class="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
     + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
     + '<rect x="9" y="9" width="13" height="13" rx="2"/>'
     + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
     + '<svg class="ico-done" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
     + ' stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-    + '<path d="M20 6 9 17l-5-5"/></svg>'
-    + '</button>';
+    + '<path d="M20 6 9 17l-5-5"/></svg>';
+}
+function copyBtnHtml() {
+  return '<button type="button" class="copy" title="Copy" aria-label="Copy code">'
+    + copyIcons() + '</button>';
 }
 function appendDelta(delta) {
   const t = ensureTxt();
@@ -719,6 +825,15 @@ function toolRow(name, arg) {
 }
 function appendUser(t, images) {
   const m = el('div', 'msg user');
+  if (t) {   // image-only sends have nothing to copy
+    const cp = document.createElement('button');
+    cp.type = 'button';
+    cp.className = 'pcopy';
+    cp.title = 'Copy prompt';
+    cp._text = t;
+    cp.innerHTML = copyIcons();
+    m.appendChild(cp);
+  }
   const b = el('div', 'bubble');
   if (t) b.appendChild(document.createTextNode(t));
   for (const im of (images || []).filter(im => im.data)) {
