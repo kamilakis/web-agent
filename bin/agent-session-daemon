@@ -538,22 +538,23 @@ class Daemon:
             self.current_out_dir = None
             self.dispatch_map.clear()
 
-    def switch_to_new(self, archive):
+    def switch_to_new(self, archive, name=None):
         """Switch pi onto a fresh session (see craft_session_file). The old
         transcript is left in sessions/ (listed as a previous session) or
-        moved to ARCHIVE_DIR. Auto-aborts any in-flight run first."""
+        moved to ARCHIVE_DIR. Auto-aborts any in-flight run first.
+        `name` optionally names the new session (default: SESSION_NAME)."""
         with self.lock:
             if self.switching:
                 return {"error": "a session switch is already in progress"}
             self.switching = True
         try:
-            return self._switch_to_new(archive)
+            return self._switch_to_new(archive, name)
         finally:
             with self.lock:
                 self.switching = False
             self.maybe_dispatch()   # queued prompts continue in the new session
 
-    def _switch_to_new(self, archive):
+    def _switch_to_new(self, archive, name=None):
         self._abort_and_settle()
         self._reset_run_state()
         try:
@@ -594,7 +595,8 @@ class Daemon:
         # name so it survives restarts and shows in listings.
         try:
             self.send_cmd_with_response(
-                {"type": "set_session_name", "name": SESSION_NAME}, timeout=10)
+                {"type": "set_session_name", "name": (name or SESSION_NAME).strip()[:80]},
+                timeout=10)
         except TimeoutError:
             log("set_session_name after switch timed out (non-fatal)")
         moved = None
@@ -1174,16 +1176,34 @@ class Handler(BaseHTTPRequestHandler):
             self._json(resp.get("data") if resp.get("data") is not None else {"ok": True})
         elif path == "/newsession":
             try:
-                self._json(Handler.d.switch_to_new(archive=False))
+                self._json(Handler.d.switch_to_new(
+                    archive=False, name=(body.get("name") or "").strip()[:80] or None))
             except Exception as e:
                 log("newsession error:", e)
                 self._json({"error": str(e)}, 500)
         elif path == "/archive":
             try:
-                self._json(Handler.d.switch_to_new(archive=True))
+                self._json(Handler.d.switch_to_new(
+                    archive=True, name=(body.get("name") or "").strip()[:80] or None))
             except Exception as e:
                 log("archive error:", e)
                 self._json({"error": str(e)}, 500)
+        elif path == "/sessionname":
+            name = (body.get("name") or "").strip()[:80]
+            if not name:
+                self._json({"error": "name required"}, 400)
+                return
+            try:
+                resp = Handler.d.send_cmd_with_response(
+                    {"type": "set_session_name", "name": name}, timeout=10)
+            except TimeoutError as e:
+                self._json({"error": str(e)}, 504)
+                return
+            if resp.get("success") is False:
+                self._json({"error": resp.get("error") or "set_session_name failed"}, 502)
+                return
+            log("session renamed:", name)
+            self._json({"ok": True, "name": name})
         else:
             self._json({"error": "not found"}, 404)
 

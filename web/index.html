@@ -406,7 +406,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-14.7';
+const UI_VERSION = '2026-09-14.8';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -648,10 +648,13 @@ async function doSwitch(kind) {
     ? 'Archive this session and start a fresh one?' + busyNote
     : 'Start a new session? This one stays in the list.' + busyNote;
   if (!confirm(q)) return;
+  const ans = prompt('Name the new session\n(blank = the default "' + (sessionName.textContent || 'siri-agent') + '"):', '');
+  if (ans === null) return;   // cancelled
+  const name = ans.trim().slice(0, 80);
   sbNew.disabled = sbArchive.disabled = true;
   try {
-    const res = await fetch('/' + kind, {method: 'POST', headers: H})
-      .then(r => r.json());
+    const res = await fetch('/' + kind, {method: 'POST', headers: H,
+      body: JSON.stringify(name ? {name} : {})}).then(r => r.json());
     if (res.error) sbMsg(res.error);
   } catch { sbMsg('switch failed — is the daemon up to date?'); }
   sbNew.disabled = sbArchive.disabled = false;
@@ -661,6 +664,23 @@ async function doSwitch(kind) {
 }
 sbNew.onclick = () => doSwitch('newsession');
 sbArchive.onclick = () => doSwitch('archive');
+// click the session name in the header to rename the live session
+sessionName.style.cursor = 'pointer';
+sessionName.title = 'click to rename this session';
+sessionName.onclick = async () => {
+  const cur = (sessionName.textContent || '').trim();
+  const ans = prompt('Rename this session:', cur);
+  if (ans === null) return;
+  const name = ans.trim().slice(0, 80);
+  if (!name || name === cur) return;
+  try {
+    const res = await fetch('/sessionname', {method: 'POST', headers: H,
+      body: JSON.stringify({name})}).then(r => r.json());
+    if (res.error) sbMsg(res.error);
+  } catch { sbMsg('rename failed — is the daemon up to date?'); }
+  await loadSessions();
+  refreshHeader();
+};
 document.getElementById('bannerBack').onclick = returnToLive;
 
 // The sidebar is a fixed 25vw (min 220px, max 420px) — no JS resize.

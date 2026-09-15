@@ -30,6 +30,9 @@ across surfaces.
   - live token streaming with tool-call rows (Claude Code style) and markdown
   - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
   - model switcher, status dot, reconnect with snapshot re-render
+  - **session history sidebar** — list, view, archive and create sessions;
+    new sessions can be named at creation, and clicking the session name in
+    the header renames the live one
   - **pictures**: attach from camera/roll (client-side downscale); the daemon
     auto-switches to a vision model when the session model is text-only
   - **image editing**: sent photos are saved to disk with their paths named in
@@ -105,6 +108,7 @@ nothing personal is baked in.
 | `AGENT_PROVIDER` / `AGENT_MODEL` | `deepseek` / `deepseek-v4-pro` | pi provider and model |
 | `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
 | `AGENT_SESSION_ID` | `siri-agent` | session id = memory key; change to wipe |
+| `AGENT_SESSION_NAME` | `siri-agent` | display name for new sessions (the web UI can name them per-session) |
 | `AGENT_TASK_WAIT` | `15` | seconds Siri holds the SSH call open |
 | `AGENT_SETTLE_GRACE` | `30` | seconds before an unanswered answer falls back to Matrix |
 | `AGENT_WEB_HOST` / `AGENT_WEB_PORT` | `127.0.0.1` / `8383` | dashboard bind address/port |
