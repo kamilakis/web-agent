@@ -1,6 +1,6 @@
 # web-agent
 
-A mobile-first web dashboard plus Siri and Matrix bridges for a persistent
+A mobile-first web chat plus Siri and Matrix bridges for a persistent
 [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent session —
 **one agent, three surfaces, one memory.**
 
@@ -26,7 +26,7 @@ across surfaces.
   ones fall back to Matrix.
 - **Matrix** — an event-driven listener (server-held long-poll sync, not busy
   polling) forwards room messages to the agent; answers post back to the room.
-- **Web dashboard** — mobile-first, light/dark:
+- **Web chat** — mobile-first, light/dark:
   - live token streaming with tool-call rows (Claude Code style) and markdown
   - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
   - model switcher, status dot, reconnect with snapshot re-render
@@ -69,7 +69,7 @@ cd web-agent
 ./install.sh
 ```
 
-`install.sh` copies `bin/*` to `~/.local/bin`, the dashboard to
+`install.sh` copies `bin/*` to `~/.local/bin`, the chat to
 `~/.local/share/agent-session/web/`, and the units to
 `~/.config/systemd/user/`, then enables and starts both services.
 
@@ -91,7 +91,7 @@ cd web-agent
    SSH* (`ssh <host> agent-task "Dictated Text"`, full path required) → Speak
    Text ← Shell Script Result.
 
-3. **Dashboard**: open `http://<host>:8383` from a device on the private
+3. **chat**: open `http://<host>:8383` from a device on the private
    network. `AGENT_WEB_HOST` (default `127.0.0.1`) controls the bind address —
    set it to your VPN IP to reach the dashboard remotely.
 
@@ -117,7 +117,7 @@ nothing personal is baked in.
 
 ## Security notes
 
-- The dashboard intentionally speaks plain HTTP — put it on a private network
+- The chat intentionally speaks plain HTTP — put it on a private network
   (WireGuard/Tailscale) and bind `AGENT_WEB_HOST` to that interface only.
 - `AGENT_WEB_TOKEN` adds a bearer-token check on every route (including
   `?token=` for `EventSource`, which cannot send headers).
