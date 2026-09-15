@@ -140,6 +140,15 @@ header .session {
   font-size:11px; color:var(--dim); font-family:var(--mono);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
+.session-row { display:flex; align-items:center; gap:4px; min-width:0; }
+.session-row .session { min-width:0; }
+header .rename {
+  flex:0 0 auto; display:flex; align-items:center; justify-content:center;
+  width:18px; height:18px; padding:0; border:0; border-radius:4px;
+  background:transparent; color:var(--dim); cursor:pointer; opacity:.55;
+}
+header .rename:hover { opacity:1; background:rgba(128,128,128,.18); }
+header .rename svg { width:11px; height:11px; }
 header .spacer { flex:1 1 auto; }
 .status { display:flex; align-items:center; gap:5px; flex:0 0 auto; }
 .dot { width:7px; height:7px; border-radius:50%; background:var(--dim); flex:0 0 auto; }
@@ -371,7 +380,12 @@ footer {
   </svg>
   <div class="names">
     <div class="title">Agent</div>
-    <div class="session" id="sessionName"></div>
+    <div class="session-row">
+      <div class="session" id="sessionName"></div>
+      <button class="rename" id="renameBtn" title="rename this session" aria-label="rename this session">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+      </button>
+    </div>
   </div>
   <div class="spacer"></div>
   <div class="status"><span class="dot warn" id="statusDot"></span><span id="statusText">connecting…</span></div>
@@ -406,7 +420,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-14.8';
+const UI_VERSION = '2026-09-14.9';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -417,6 +431,7 @@ const modelSel = document.getElementById('modelSel');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const sessionName = document.getElementById('sessionName');
+const renameBtn = document.getElementById('renameBtn');
 const attachBtn = document.getElementById('attachBtn');
 const fileInput = document.getElementById('fileInput');
 
@@ -664,10 +679,8 @@ async function doSwitch(kind) {
 }
 sbNew.onclick = () => doSwitch('newsession');
 sbArchive.onclick = () => doSwitch('archive');
-// click the session name in the header to rename the live session
-sessionName.style.cursor = 'pointer';
-sessionName.title = 'click to rename this session';
-sessionName.onclick = async () => {
+// pencil next to the session name renames the live session
+renameBtn.onclick = async () => {
   const cur = (sessionName.textContent || '').trim();
   const ans = prompt('Rename this session:', cur);
   if (ans === null) return;
