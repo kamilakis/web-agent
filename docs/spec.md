@@ -1087,7 +1087,7 @@ The UI checks ran the real `web/index.html` script under a stub DOM
 
 ### 17.5 Follow-ups found while diagnosing (NOT fixed here)
 
-1. **Restart resumes the OLDEST session file, not the active one.**
+1. **Restart resumed the OLDEST session file, not the active one.**
    `--session-id` resolves to *a* project session with that id when several
    exist, and pi takes the **first match by filename (oldest)**, not the newest:
    reproduced with two files (`2026-01-01…_testid.jsonl`,
@@ -1095,10 +1095,8 @@ The UI checks ran the real `web/index.html` script under a stub DOM
    January one. Live consequence: the daemon was on `/sessions/2026-09-14…`
    (245 messages) after a restart, while the session the user had just created
    ("Email quote", `2026-09-25T04-44-27-413Z_siri-agent.jsonl`) sat orphaned.
-   Every daemon restart silently rewinds to the first transcript of that id.
-   Fix candidates: stop leaving several files with the same id in the lookup
-   dir (rename the superseded ones), or persist the active file and pass
-   `--session <path>` instead of `--session-id`.
+   Every restart silently rewound to the first transcript of that id.
+   **Fixed in §17.7** the same day.
 2. **A stale pi bundle is invisible until a prompt runs.** An in-place `npm`
    upgrade under a running daemon breaks the next prompt only. Recording
    `pi --version` (or the bundle mtime) at `start_pi()` and comparing on each
@@ -1134,3 +1132,57 @@ OPENED: old=… new=… name=…`, and all four rejection cases return 400/404.
 see §17.5 #1. The endpoint is the mechanism a fix would use at startup
 ("resume the recorded active file"), which is why it exists before the rest of
 that fix landed.
+
+### 17.7 Restart resumes the active session (built 2026-09-25)
+
+The §17.5 #1 fix. `start_pi()` now resumes a *file*, not an id:
+
+```python
+resume = self.resume_target()          # the recorded active transcript
+if resume:  cmd += ["--session", resume]
+else:       cmd += ["--session-id", SESSION_ID, "-n", SESSION_NAME]
+```
+
+**The record.** `$AGENT_SESSION_DIR/active-session` holds the absolute path of
+the live transcript, written atomically (`.tmp` + `os.replace`) at startup by a
+tracker thread that asks pi for its `sessionFile`, and on every switch
+(`/newsession`, `/archive`, `/opensession`). `resume_target()` prefers it, falls
+back to the newest valid `*_<SESSION_ID>.jsonl` when it is missing or stale, and
+returns `None` (→ brand-new session) only when there is nothing to resume.
+
+**Three details that are not obvious:**
+
+- **`-n` is omitted when resuming.** A name flag is written into the transcript
+  as a `session_info` and *renames* the resumed session — verified: resuming a
+  file whose last `session_info` said "Email quote" with `-n siri-agent` appended
+  `{"name":"siri-agent"}` and the header showed that instead. Without `-n`, the
+  transcript's own name survives (and one is only needed for a new session).
+- **Resume targets are validated** (`_valid_session_file`: non-empty, first line
+  a `{"type":"session"}` header). A resume target pi cannot parse would make it
+  exit on startup and systemd would restart into the same file — a crash loop.
+  Invalid candidates are skipped, including in the newest-file fallback.
+- **The record is confined** to `sessions/` and `archive/` by `realpath`;
+  anything else is ignored. Archived transcripts stay resumable, since
+  `/opensession` can open them.
+
+Not used: `-c/--continue` ("most recent session for the project") — it picks by
+its own idea of recency, which is the bug being fixed, and cannot express "the
+one the user last switched to".
+
+### 17.8 Test plan for §17.7 (executed 2026-09-25)
+
+Same hermetic harness; the fake pi records the argv it was started with, so the
+daemon's resume decision is asserted directly. 17/17 pass.
+
+| Case | Expected | Result |
+|---|---|---|
+| fresh start, no files, no record | `--session-id … -n …`, no `--session` | ✅ |
+| restart with a record, older namesake present | opens the **recorded** file, not the oldest | ✅ |
+| record points at a deleted file | falls back to the newest *valid* transcript | ✅ |
+| newest files empty / unparseable | skipped; the previous good one is used | ✅ |
+| record points outside `sessions`+`archive` (`/etc/passwd`) | refused | ✅ |
+| after `/newsession` and `/opensession` | record updated to the new file | ✅ |
+| restart again | keeps the active session | ✅ |
+
+Regression suites re-run on the same binary: error surfacing (§17.4, 6/6),
+`/opensession` (11/11), dashboard renderer (`node ui.test.js`, 10/10).

@@ -57,6 +57,9 @@ TASKS = os.path.join(STATE, "tasks")
 LOG = os.path.join(STATE, "daemon.log")
 SESSIONS_DIR = os.path.join(STATE, "sessions")
 ARCHIVE_DIR = os.path.join(STATE, "archive")
+# Which transcript pi is currently on, as an absolute path. Written on every
+# session switch and at startup, read by start_pi() — see resume_target().
+ACTIVE_FILE = os.path.join(STATE, "active-session")
 
 # Web dashboard (SSE + HTTP control plane). WireGuard-only by default.
 WEB_ENABLED = os.environ.get("AGENT_WEB_ENABLED", "1") != "0"
@@ -227,6 +230,35 @@ def session_messages(path, cap=4000):
     return {"messages": out}
 
 
+def _valid_session_file(path):
+    """A file pi can actually resume: a readable JSONL whose first line is a
+    session header. Guarding this matters because a resume target that makes pi
+    exit on startup would turn into a restart loop with systemd."""
+    try:
+        if os.path.getsize(path) == 0:
+            return False
+        with open(path, encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()
+        return (json.loads(first) or {}).get("type") == "session"
+    except (OSError, ValueError):
+        return False
+
+
+def _newest_session_file():
+    """The most recently written transcript for SESSION_ID, or None. Used only
+    when there is no usable active-session record."""
+    try:
+        names = [n for n in os.listdir(SESSIONS_DIR)
+                 if n.endswith(f"_{SESSION_ID}.jsonl")]
+    except OSError:
+        return None
+    paths = [os.path.join(SESSIONS_DIR, n) for n in names
+             if _valid_session_file(os.path.join(SESSIONS_DIR, n))]
+    if not paths:
+        return None
+    return max(paths, key=lambda p: os.path.getmtime(p))
+
+
 def log(*a):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] " + " ".join(str(x) for x in a)
     with open(LOG, "a") as f:
@@ -284,16 +316,65 @@ class Daemon:
         self.clients_lock = threading.Lock()
 
     # ---- pi process ----------------------------------------------------
+    def record_active_session(self, path):
+        """Remember which transcript is live (atomic replace: the daemon may be
+        killed at any point, and a half-written record must not become the next
+        start's resume target)."""
+        try:
+            tmp = ACTIVE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(os.path.realpath(path) + "\n")
+            os.replace(tmp, ACTIVE_FILE)
+        except OSError as e:
+            log("could not record the active session file:", e)
+
+    def resume_target(self):
+        """Which transcript pi should open at startup, or None to create one.
+
+        `--session-id` alone is not enough: when several files in the session
+        dir carry that id, pi resumes the FIRST match by filename — the oldest
+        — so every restart silently rewound to the first transcript of that id
+        (docs/spec.md §17.5). Resume the recorded active file instead, fall back
+        to the most recently written one, and only start a fresh session when
+        there is nothing valid to resume.
+        """
+        roots = [os.path.realpath(SESSIONS_DIR), os.path.realpath(ARCHIVE_DIR)]
+
+        def allowed(p):
+            return any(p.startswith(r + os.sep) for r in roots)
+
+        try:
+            with open(ACTIVE_FILE, encoding="utf-8") as f:
+                rec = f.read().strip()
+        except OSError:
+            rec = ""
+        if rec:
+            p = os.path.realpath(rec)
+            if allowed(p) and _valid_session_file(p):
+                return p
+            log("active-session record is unusable, ignoring it:", rec)
+        newest = _newest_session_file()
+        if newest:
+            log("no active-session record; resuming the newest transcript:", newest)
+        return newest
+
     def start_pi(self):
+        resume = self.resume_target()
         cmd = [
             "pi", "--mode", "rpc",
             "--provider", PROVIDER,
             "--model", MODEL,
-            "--session-id", SESSION_ID,
             "--session-dir", SESSIONS_DIR,
-            "-n", SESSION_NAME,
             "-a",  # trust project resources (MCP servers, skills) non-interactively
         ]
+        if resume:
+            # --session <path> opens exactly this file; --session-id would pick
+            # an arbitrary namesake (the oldest). No -n either: a name flag is
+            # written into the transcript as a session_info and would rename the
+            # resumed session (verified), so the file's own name wins.
+            cmd += ["--session", resume]
+        else:
+            cmd += ["--session-id", SESSION_ID, "-n", SESSION_NAME]
         log("starting pi:", " ".join(cmd), "cwd=", WORKDIR)
         self.proc = subprocess.Popen(
             cmd,
@@ -305,6 +386,26 @@ class Daemon:
             text=True,
         )
         threading.Thread(target=self._drain_stderr, daemon=True).start()
+
+    def _track_active_session(self):
+        """Ask pi which file it really opened and remember it, so the next start
+        resumes that transcript. pi answers get_state only once it is up, and
+        read_events() is already draining stdout by then."""
+        for _ in range(30):
+            try:
+                st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+            except TimeoutError:
+                time.sleep(1)
+                continue
+            f = (st.get("data") or {}).get("sessionFile")
+            if f and _valid_session_file(f):
+                self.record_active_session(f)
+                log("active session recorded:", f)
+                return
+            if not f:
+                return          # pi has no session (--no-session): nothing to record
+            time.sleep(1)       # a session pi just created may not be flushed yet
+        log("could not record the active session file at startup")
 
     def _drain_stderr(self):
         for line in self.proc.stderr:
@@ -616,6 +717,7 @@ class Daemon:
                                  f"failed: {e}"}
         log("SESSION SWITCHED:", "archive" if archive else "new",
             "old=", old_file, "new=", new_file)
+        self.record_active_session(new_file)
         self.broadcast({"type": "session_switched",
                         "archived": bool(moved), "newFile": new_file})
         return {"ok": True, "oldFile": old_file, "newFile": new_file,
@@ -681,6 +783,7 @@ class Daemon:
         except TimeoutError:
             pass
         log("SESSION OPENED: old=", old_file, "new=", path, "name=", name)
+        self.record_active_session(path)
         self.broadcast({"type": "session_switched", "archived": False,
                         "newFile": path})
         return {"ok": True, "oldFile": old_file, "newFile": path, "name": name}
@@ -1040,6 +1143,7 @@ class Daemon:
         threading.Thread(target=self.read_fifo, daemon=True).start()
         threading.Thread(target=self.janitor, daemon=True).start()
         self.start_web()
+        threading.Thread(target=self._track_active_session, daemon=True).start()
         self.read_events()   # blocks until pi dies
 
 

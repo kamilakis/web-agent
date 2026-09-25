@@ -21,7 +21,9 @@ across surfaces.
 ## Features
 
 - **Persistent session** — one `pi --mode rpc` process with a fixed session id;
-  full memory across restarts, shared by every surface.
+  full memory across restarts, shared by every surface. Restarts resume the
+  **active** transcript (recorded in `$AGENT_SESSION_DIR/active-session`), not
+  whichever namesake file pi's id lookup happens to pick first.
 - **Siri** — dictate a command over SSH; short answers are spoken back, long
   ones fall back to Matrix.
 - **Matrix** — an event-driven listener (server-held long-poll sync, not busy
