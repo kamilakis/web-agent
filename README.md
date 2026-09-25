@@ -29,7 +29,9 @@ across surfaces.
 - **Matrix** — an event-driven listener (server-held long-poll sync, not busy
   polling) forwards room messages to the agent; answers post back to the room.
 - **Web chat** — mobile-first, light/dark:
-  - live token streaming with tool-call rows (Claude Code style) and markdown
+  - live token streaming with tool-call rows (Claude Code style) and markdown —
+    one row per call, described in plain language (`Running ls -la`) with the
+    exact command and result behind a toggle, identical live and after a reload
   - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
   - model switcher, status dot, reconnect with snapshot re-render
   - **session history sidebar** — list, view, archive and create sessions;
@@ -125,6 +127,16 @@ cd web-agent
 3. **chat**: open `http://<host>:8383` from a device on the private
    network. `AGENT_WEB_HOST` (default `127.0.0.1`) controls the bind address —
    set it to your VPN IP to reach the dashboard remotely.
+
+## Tests
+
+No dependencies, no daemon, no fake pi — the page is a single file, so the
+tests pull the marked blocks out of `web/index.html` and run them under node:
+
+```sh
+node tests/describeTool.test.js   # the plain-language tool descriptions
+node tests/toolRows.test.js       # row pairing: parallel calls, errors, reload
+```
 
 ## Configuration
 

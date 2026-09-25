@@ -224,7 +224,16 @@ def session_messages(path, cap=4000):
                     continue
             else:
                 continue
-            out.append({"role": role, "content": content})
+            # §8 L6: without the call id the dashboard cannot pair a result with
+            # the row that made it, so it invents a separate "result" row.
+            entry = {"role": role, "content": content}
+            if role == "toolResult":
+                if m.get("toolCallId"):
+                    entry["toolCallId"] = m.get("toolCallId")
+                if m.get("toolName"):
+                    entry["toolName"] = m.get("toolName")
+                entry["isError"] = bool(m.get("isError"))
+            out.append(entry)
             if len(out) >= cap:
                 break
     return {"messages": out}

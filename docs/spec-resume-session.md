@@ -225,6 +225,10 @@ Hermetic (fake pi) unless marked **live**.
 
 ## Part B — Descriptive tool rows
 
+> **Built 2026-09-25 (Tier 1 only)** — see `docs/spec.md` §18.1 for what landed
+> and the test results. Tier 2 (model-written bash descriptions) and §8.4's
+> iPhone-Safari screenshot check are still open.
+
 ### 8.1 What it looks like now (screenshots from 2026-09-25, iPhone Safari)
 
 - `docs/img-tool-rows-live.png`: **live stream.** Every row shows only the raw

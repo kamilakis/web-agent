@@ -1187,17 +1187,57 @@ daemon's resume decision is asserted directly. 17/17 pass.
 Regression suites re-run on the same binary: error surfacing (§17.4, 6/6),
 `/opensession` (11/11), dashboard renderer (`node ui.test.js`, 10/10).
 
-## 18. Dashboard: resume, delete, descriptive tool rows (spec'd 2026-09-25, NOT built)
+## 18. Dashboard: resume, delete, descriptive tool rows (spec'd 2026-09-25)
 
 Full spec, bug lists and test plans:
 [`docs/spec-resume-session.md`](spec-resume-session.md).
+
+### 18.1 Part B — descriptive tool rows (built 2026-09-25, Tier 1)
+
+One plain-language line per tool call, in the *same* form live and after a
+reload: `Running ls -la`, `Searching memos for “ssh access”`, with the tool name
+as a small dim tag on the right and the exact call + result behind the toggle.
+
+What was wrong and is now fixed (the L-list from the spec):
+
+| # | Bug | Fix |
+|---|---|---|
+| L1 | live rows had no argument or detail — `toolcall_start` made the row with `null` and nothing ever filled it | the row is described at `toolcall_end` / `tool_execution_start` from the real `arguments`/`args`; until then it reads `Preparing <tool>…` |
+| L2 | parallel calls shared one `curTool` pointer, so earlier rows pulsed forever and results landed on the wrong row | rows live in `toolRows` keyed by `toolCallId`, with a FIFO of rows whose `toolcall_start` carried no id; `settleToolRows()` on `agent_settled` ends anything still running |
+| L3 | live wrote the result *into* the call row while a snapshot appended a detached `result` row | one row shape for both paths: labelled `call` + `result` sections, painted from `_args`/`_result` |
+| L4 | the status dot was `content:"⏺"`, which iOS renders as an emoji that ignores `color` | the shared `.dot` CSS circle |
+| L5 | large vertical gaps between consecutive tool steps | `margin:6px 0 8px` with `details.tool + details.tool { margin-top:2px }` |
+| L6 | `session_messages()` (past transcripts) kept only `role` + `content`, dropping `toolCallId`/`toolName`/`isError`, so history could not pair results with calls | the daemon keeps the three fields on `toolResult` messages |
+
+`describeTool(name, args)` is a pure function in `web/index.html` with the table
+in one object literal (new MCP tools are one line each). Bash uses
+`args.description` if a future Tier 2 supplies one, else the first command with a
+leading `cd … &&` stripped and the text ellipsised at ~60 chars.
+
+Tests, neither needing the daemon or the fake-pi harness:
+
+```sh
+node tests/describeTool.test.js   # ok — 47 describeTool cases passed
+node tests/toolRows.test.js       # ok — 20 tool-row cases passed
+```
+
+`tests/describeTool.test.js` extracts the marked block from the page and runs the
+§8.3 table (every row, plus `null`, non-string and empty args).
+`tests/toolRows.test.js` drives the row events against a ~40-line stub DOM: three
+parallel calls with results arriving in reverse order, an id-less
+`toolcall_start`, one error among successes, and the same turn rendered live vs
+from transcript messages. `UI_VERSION` → `2026-09-25.1`.
+
+Not built: **Tier 2** (model-written bash descriptions — needs `pi.registerTool`
+to be able to shadow the built-in `bash`, unverified), the iPhone-Safari
+screenshot check (the dot is now a `background`-coloured element, so the emoji
+failure mode is structurally gone), and the `describeTool` cases for tools not
+seen in a real transcript. Parts A and C below are untouched.
+
 - **A. Resume** a past session: `/opensession` has no UI yet. It also has a
   stale `model_input` after switches, an "already open" check that runs after
   the abort, a resumed archive file listed twice, and interrupted Siri runs
   that are never answered.
-- **B. Descriptive tool rows**: one plain-language line per call with the
-  command behind a toggle. Also fixes the live/reload rendering bugs:
-  parallel calls on one `curTool` pointer, no arguments while streaming,
-  detached `result` rows, emoji dots on iOS.
 - **C. Delete** non-live sessions (soft delete to `trash/`, purged after 30
-  days).
+  days). Note the purge has no owner: `janitor()` only re-checks dispatch, there
+  is no `trash/` dir and no `AGENT_TRASH_DAYS` anywhere.

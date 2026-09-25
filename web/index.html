@@ -285,25 +285,29 @@ main {
 }
 @keyframes blink { 50% { opacity:0; } }
 
-/* ---------- tool calls, Claude Code style ---------- */
-details.tool { width:100%; margin:10px 0 12px; font-family:var(--mono); font-size:12.5px; }
+/* ---------- tool calls, Claude Code style (§8 tool rows) ---------- */
+details.tool { width:100%; margin:6px 0 8px; font-family:var(--mono); font-size:12.5px; }
+/* §8 L5: parallel calls are siblings in one message — keep the stack tight */
+details.tool + details.tool { margin-top:2px; }
 details.tool summary {
-  display:flex; align-items:baseline; gap:7px;
+  display:flex; align-items:center; gap:7px;
   list-style:none; cursor:pointer; user-select:none;
   padding:1px 0; color:var(--dim);
 }
 details.tool summary::-webkit-details-marker { display:none; }
-details.tool summary::before {
-  content:"⏺"; font-size:9px; line-height:1.75; flex:0 0 auto; color:var(--dim);
-}
-details.tool.running summary::before { color:var(--accent); animation:pulse .9s ease-in-out infinite alternate; }
-details.tool.done summary::before { color:var(--ok); }
-details.tool.error summary::before { color:var(--danger); }
-details.tool .name { color:var(--text); flex:0 0 auto; }
-details.tool .arg {
-  flex:1 1 auto; min-width:0; color:var(--dim);
+/* §8 L4: a real CSS circle (the shared .dot), never "⏺" — iOS renders that
+   as an emoji, and an emoji ignores `color`, so the dot stayed blue. */
+details.tool .dot { background:var(--dim); }
+details.tool.running .dot { background:var(--accent); animation:pulse .9s ease-in-out infinite alternate; }
+details.tool.done .dot { background:var(--ok); animation:none; }
+details.tool.error .dot { background:var(--danger); animation:none; }
+details.tool .desc {
+  flex:1 1 auto; min-width:0; color:var(--text); font-family:var(--sans);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
+details.tool.error .desc { color:var(--danger); }
+/* the tool name is a small dim tag on the right (§8.2) */
+details.tool .name { flex:0 0 auto; color:var(--dim); font-size:11px; opacity:.75; }
 details.tool .chev { flex:0 0 auto; font-size:10px; opacity:.5; transition:transform .15s; }
 details.tool[open] .chev { transform:rotate(90deg); }
 details.tool .out {
@@ -315,6 +319,10 @@ details.tool .out {
   scrollbar-width:thin; scrollbar-color:var(--border) transparent;
 }
 details.tool .out:empty { display:none; }
+details.tool .sec { display:flex; gap:8px; }
+details.tool .sec + .sec { margin-top:4px; }
+details.tool .lbl { flex:0 0 auto; width:42px; color:var(--dim); opacity:.6; }
+details.tool .body { flex:1 1 auto; min-width:0; }
 .empty {
   margin:auto; padding:40px 24px; text-align:center;
   color:var(--dim); font-size:14px;
@@ -431,7 +439,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-14.9';
+const UI_VERSION = '2026-09-25.1';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -713,7 +721,6 @@ const preview = document.getElementById('preview');
 let working = false;
 let curBubble = null;   // streaming assistant message container
 let curTxt = null;      // streaming text bubble
-let curTool = null;     // streaming tool row
 let firstOpen = true;
 let es = null;
 let mine = [];          // prompts this page sent, to dedupe the echoed user message
@@ -797,7 +804,7 @@ function appendDelta(delta) {
   t._raw = (t._raw || '') + delta;
   t.innerHTML = mdToHtml(t._raw);
 }
-function resetStream() { endCaret(); curBubble = null; curTxt = null; curTool = null; }
+function resetStream() { endCaret(); curBubble = null; curTxt = null; resetToolRows(); }
 
 // ---- §16 interactive choices ----
 // Parse the LAST closed ```choose fence out of an assistant reply and swap it
@@ -847,8 +854,12 @@ function chooseOption(wrap, opt) {
   }).catch(() => setStatus('reconnecting…'));
 }
 
-// ---- snapshot rendering ----
-function argPreview(arg) {
+// ---- §8.3 tool descriptions (pure) ----
+// --- describeTool:start ---
+// §8.3 Tier 1: a deterministic, client-side description for every tool call.
+// Pure (no DOM) on purpose: tests/describeTool.test.js loads exactly this
+// block and runs the table below against it. Keep new describers one line each.
+function toolArgPreview(arg) {
   if (arg == null) return '';
   if (typeof arg === 'string') return arg.trim().split('\n')[0];
   if (typeof arg !== 'object') return String(arg);
@@ -860,19 +871,204 @@ function argPreview(arg) {
   }
   return '';
 }
-function toolRow(name, arg) {
-  const d = el('details', 'tool done');
+function toolStr(v) {
+  if (v == null) return '';
+  return typeof v === 'string' ? v.trim() : String(v);
+}
+function toolEllipsise(s, n) {
+  s = String(s == null ? '' : s);
+  n = n || 60;
+  return s.length <= n ? s : s.slice(0, n - 1).trimEnd() + '…';
+}
+function toolBasename(p) {
+  const s = toolStr(p).replace(/\/+$/, '');
+  return s.split('/').pop() || s;
+}
+function toolQuoted(v) {
+  const s = toolStr(v);
+  return s ? '“' + s + '”' : '';
+}
+// "mcp__memos__search_memos" -> {server:"memos", tool:"search_memos"}, else null
+function toolMcp(name) {
+  const parts = String(name || '').split('__');
+  if (parts.length < 3 || parts[0] !== 'mcp') return null;
+  return {server: parts.slice(1, -1).join('__'), tool: parts[parts.length - 1]};
+}
+// Human words for a tool: the MCP tool name, or the plain name with _ -> space.
+function toolWords(name) {
+  const mcp = toolMcp(name);
+  const w = (mcp ? mcp.tool : String(name || '')).replace(/_/g, ' ').trim();
+  return w ? w.charAt(0).toUpperCase() + w.slice(1) : 'Tool';
+}
+// The right-hand dim tag: `bash`, `read`, `mcp memos`.
+function toolTag(name) {
+  const mcp = toolMcp(name);
+  return mcp ? 'mcp ' + mcp.server : String(name || '');
+}
+function toolFirstString(a) {
+  if (typeof a === 'string') return a.trim();
+  if (!a || typeof a !== 'object') return '';
+  for (const v of Object.values(a)) {
+    if (typeof v === 'string' && v.trim()) return v.trim().split('\n')[0];
+  }
+  return '';
+}
+// `cd /x && ls -la | head` -> `ls -la`: drop a leading cd, keep the first command.
+function toolShortCommand(cmd) {
+  let s = toolStr(cmd);
+  if (!s) return '';
+  s = s.replace(/^cd\s+[^&|;\n]+&&\s*/, '');
+  return s.split(/\n|&&|\|\||;|\|/)[0].trim();
+}
+function toolDescribeBash(a) {
+  const d = toolStr(a.description);          // Tier 2 fills this in if it ever lands
+  if (d) return toolEllipsise(d, 60);
+  const cmd = toolShortCommand(a.command);
+  return cmd ? 'Running ' + toolEllipsise(cmd, 60) : 'Running a command';
+}
+const TOOL_DESCRIBERS = {
+  read:  a => 'Reading ' + toolBasename(a.file_path || a.path),
+  write: a => 'Writing ' + toolBasename(a.file_path || a.path),
+  edit:  a => 'Editing ' + toolBasename(a.file_path || a.path),
+  grep:  a => 'Searching files for ' + toolQuoted(a.pattern),
+  find:  a => 'Finding files named ' + toolQuoted(a.pattern),
+  ls:    a => 'Listing ' + (toolStr(a.path || a.dir) || '.'),
+  'mcp__memos__search_memos': a => 'Searching memos for ' + toolQuoted(a.query),
+  'mcp__memos__get_memo': a => 'Opening memo ' +
+    (toolStr(a.id) ? toolStr(a.id).slice(0, 8) + '…' : ''),
+};
+function describeTool(name, args) {
+  const a = (args && typeof args === 'object') ? args : {};
+  const n = String(name || '');
+  if (n === 'bash') return toolDescribeBash(a);
+  const fn = TOOL_DESCRIBERS[n];
+  if (fn) return fn(a).trim();
+  const mcp = toolMcp(n);
+  const words = toolWords(n);
+  if (mcp) {
+    const arg = toolFirstString(a);
+    return words + ' (' + mcp.server + ')' + (arg ? ': ' + toolEllipsise(arg, 40) : '');
+  }
+  const arg = toolArgPreview(a);
+  return words + (arg ? ': ' + toolEllipsise(arg, 40) : '');
+}
+// Shown between toolcall_start and toolcall_end, while the args still stream.
+function toolPreparing(name) { return 'Preparing ' + toolWords(name) + '…'; }
+// --- describeTool:end ---
+
+// ---- §8 tool rows: one row per tool call, keyed by toolCallId ----
+// Live and reloaded views share this: a row is created by its call, filled by
+// its execution, and looked up by id — never by "the last row I made".
+// tests/toolRows.test.js evaluates exactly this block against a stub DOM.
+// --- toolRows:start ---
+const TOOL_RESULT_MAX = 2048;   // mirrors the daemon's AGENT_WEB_TOOL_CAP
+let toolRows = new Map();       // toolCallId -> <details class="tool">
+let unboundTools = [];          // rows whose toolcall_start carried no id yet
+function toolRow(name, id) {
+  const d = el('details', 'tool running');
+  if (id) d.dataset.id = id;
   const s = el('summary');
-  s.appendChild(el('span', 'name', name));
-  s.appendChild(el('span', 'arg', argPreview(arg)));
+  s.appendChild(el('span', 'dot'));
+  s.appendChild(el('span', 'desc', toolPreparing(name)));
+  s.appendChild(el('span', 'name', toolTag(name)));
   s.appendChild(el('span', 'chev', '›'));
   d.appendChild(s);
-  const out = el('div', 'out');
-  if (typeof arg === 'string') out.textContent = arg;
-  else if (arg != null) out.textContent = JSON.stringify(arg, null, 2);
-  d.appendChild(out);
+  d.appendChild(el('div', 'out'));
+  d._name = name;
+  d._args = undefined;
+  d._result = '';
   return d;
 }
+// Exactly what the model sent: the command for bash, the JSON otherwise.
+function toolCallText(name, args) {
+  if (name === 'bash' && args && typeof args === 'object') return toolStr(args.command);
+  if (typeof args === 'string') return args;
+  try { return JSON.stringify(args, null, 2); } catch { return String(args); }
+}
+function toolResultText(res) {
+  if (res == null) return '';
+  if (typeof res === 'string') return toolEllipsise(res, TOOL_RESULT_MAX);
+  let t = '';
+  if (Array.isArray(res.content)) {
+    t = res.content.map(x => (x && x.type === 'text') ? (x.text || '') : '').join('');
+  } else if (typeof res.text === 'string') {
+    t = res.text;
+  }
+  return t.length > TOOL_RESULT_MAX ? t.slice(0, TOOL_RESULT_MAX) + '…' : t;
+}
+function paintTool(row) {
+  const out = row.querySelector('.out');
+  if (!out) return;
+  out.textContent = '';
+  if (row._args != null) {
+    const sec = el('div', 'sec');
+    sec.appendChild(el('span', 'lbl', 'call'));
+    sec.appendChild(el('span', 'body', toolCallText(row._name, row._args)));
+    out.appendChild(sec);
+  }
+  if (row._result) {
+    const sec = el('div', 'sec');
+    sec.appendChild(el('span', 'lbl', 'result'));
+    sec.appendChild(el('span', 'body', row._result));
+    out.appendChild(sec);
+  }
+}
+function setToolArgs(row, args) {
+  if (args === undefined) return;
+  row._args = args;
+  const desc = row.querySelector('.desc');
+  if (desc) desc.textContent = describeTool(row._name, args);
+  paintTool(row);
+}
+function finishTool(row, txt, isError) {
+  if (txt) row._result = txt;
+  paintTool(row);
+  row.classList.remove('running');
+  row.classList.add(isError ? 'error' : 'done');
+  if (isError) {   // §8.2: an error row carries the first line of the error
+    const first = String(row._result || '').trim().split('\n')[0];
+    if (first) row.querySelector('.desc').textContent = toolEllipsise(first, 100);
+  }
+}
+function newToolRow(name, id) {
+  const row = toolRow(name, id);
+  if (id) toolRows.set(id, row); else unboundTools.push(row);
+  return row;
+}
+// The row a call id owns: already registered, else the oldest row that never
+// got one (toolcall_start can carry an empty id).
+function bindToolRow(id, name) {
+  if (id && toolRows.has(id)) return toolRows.get(id);
+  if (!unboundTools.length) return null;
+  let i = name ? unboundTools.findIndex(r => r._name === name) : -1;
+  if (i < 0) i = 0;
+  const row = unboundTools.splice(i, 1)[0];
+  if (id) { row.dataset.id = id; toolRows.set(id, row); }
+  if (name) { row._name = name; row.querySelector('.name').textContent = toolTag(name); }
+  return row;
+}
+function resetToolRows() { toolRows = new Map(); unboundTools = []; }
+// §8 L2: with parallel calls the old single-pointer code left earlier rows
+// pulsing forever. Whatever is still running when the run ends is finished.
+function settleToolRows() {
+  for (const rows of [toolRows.values(), unboundTools]) {
+    for (const row of rows) {
+      if (!row.classList.contains('running')) continue;
+      row.classList.remove('running');
+      row.classList.add('done');
+    }
+  }
+  resetToolRows();
+}
+// A result whose call is not on screen (old transcript, or truncated by
+// MSG_SNAPSHOT) still gets a row of its own.
+function standaloneResultRow(name, txt, isError) {
+  const row = newToolRow(name || 'result', null);
+  row.querySelector('.desc').textContent = describeTool(name, null);
+  finishTool(row, txt, isError);
+  return row;
+}
+// --- toolRows:end ---
 function appendUser(t, images) {
   const m = el('div', 'msg user');
   if (t) {   // image-only sends have nothing to copy
@@ -901,8 +1097,10 @@ function textOf(content) {
   if (!Array.isArray(content)) return '';
   return content.filter(c => c && c.type === 'text').map(c => c.text).join('\n');
 }
+// ---- snapshot rendering ----
 function renderSnapshot(msgs, readOnly) {
   logEl.innerHTML = '';
+  resetToolRows();
   if (!msgs.length) logEl.appendChild(el('div', 'empty', 'Nothing here yet. Say hello.'));
   // §16 staleness: a choose block is only tappable on the very last message —
   // anything after it (the choice, a follow-up turn) makes it plain text.
@@ -927,15 +1125,28 @@ function renderSnapshot(msgs, readOnly) {
           b._raw = c.text;
           msg.appendChild(b);
         }
-        else if (c.type === 'toolCall') msg.appendChild(toolRow(c.name, c.arguments || c.input));
+        else if (c.type === 'toolCall') {
+          // §8 L3: the same row shape as the live stream, so a reloaded turn
+          // and a streamed one look identical.
+          const row = newToolRow(c.name, c.id);
+          const args = c.arguments !== undefined ? c.arguments : c.input;
+          setToolArgs(row, args);
+          row.classList.remove('running');
+          row.classList.add('done');
+          msg.appendChild(row);
+        }
       }
       if (m.stopReason === 'error') msg.appendChild(errorBubble(m.errorMessage));
       if (msg.children.length) logEl.appendChild(msg);
     } else if (m.role === 'toolResult') {
-      const txt = textOf(content);
-      if (txt) logEl.appendChild(toolRow('result', txt));
+      // §8 L6: paired by toolCallId, not appended as its own "result" row.
+      const txt = toolResultText({content: content});
+      const row = m.toolCallId ? toolRows.get(m.toolCallId) : null;
+      if (row) finishTool(row, txt, !!m.isError);
+      else if (txt) logEl.appendChild(standaloneResultRow(m.toolName, txt, !!m.isError));
     }
   }
+  unboundTools = [];   // nothing rendered here will ever be bound by a live event
   const lastAsstMsg = [...logEl.querySelectorAll('.msg.assistant')].pop();
   if (lastAsstMsg) addWholeCopy(lastAsstMsg);
   scrollBottom();
@@ -960,7 +1171,7 @@ function onEvent(e) {
   } else if (t === 'agent_settled') {
     const finished = curBubble;
     maybeApplyChoices();   // §16: parse before resetStream eats the raw text
-    setStatus(false); resetStream();
+    setStatus(false); resetStream(); settleToolRows();
     addWholeCopy(finished);
   } else if (t === 'message_start') {
     const m = ev.message || {};
@@ -989,24 +1200,27 @@ function onEvent(e) {
     if (d.type === 'text_delta') {
       appendDelta(d.delta); scrollBottom();
     } else if (d.type === 'toolcall_start') {
-      curTool = toolRow(d.toolName, null);
-      curTool.classList.remove('done'); curTool.classList.add('running');
-      ensureMsg().appendChild(curTool); scrollBottom();
+      // §8 L1/L2: rows are keyed by toolCallId from here on, so parallel calls
+      // each keep their own row and their own result.
+      ensureMsg().appendChild(newToolRow(d.toolName, d.id)); scrollBottom();
     } else if (d.type === 'toolcall_end') {
-      if (curTool) { curTool.classList.remove('running'); curTool.classList.add('done'); }
+      const tc = d.toolCall || {};
+      const row = bindToolRow(tc.id, tc.name);
+      if (row) setToolArgs(row, tc.arguments);   // the row's real description
     }
+  } else if (t === 'tool_execution_start') {
+    const row = bindToolRow(ev.toolCallId, ev.toolName);
+    if (row) setToolArgs(row, ev.args);
   } else if (t === 'tool_execution_update') {
-    if (curTool) {
-      const content = (ev.partialResult || {}).content || [];
-      const txt = content.map(c => c.text || '').join('');
-      const out = curTool.querySelector('.out');
-      if (txt && out) out.textContent = txt;
+    const row = ev.toolCallId ? toolRows.get(ev.toolCallId) : null;
+    if (row) {
+      const txt = toolResultText(ev.partialResult);
+      if (txt) row._result = txt;
+      paintTool(row);
     }
   } else if (t === 'tool_execution_end') {
-    if (curTool) {
-      curTool.classList.remove('running');
-      curTool.classList.add(ev.isError ? 'error' : 'done');
-    }
+    const row = bindToolRow(ev.toolCallId, ev.toolName);
+    if (row) finishTool(row, toolResultText(ev.result), !!ev.isError);
   } else if (t === 'web_attachments') {
     renderAttachments(ev.files || []);
   }
