@@ -621,6 +621,70 @@ class Daemon:
         return {"ok": True, "oldFile": old_file, "newFile": new_file,
                 "archived": moved}
 
+    def open_session(self, path):
+        """Switch pi onto an EXISTING transcript (resume it in place, keeping
+        its messages and its name). The caller has already validated the path
+        and confined it to sessions/ or archive/.
+
+        Why this exists: `switch_to_new` can only start a *fresh* session, and
+        `--session-id` resume after a daemon restart picks the OLDEST file with
+        that id when several exist (docs/spec.md §17.5), so the only way back
+        to a specific transcript — including the one that was live before a
+        restart — is an explicit switch.
+        """
+        with self.lock:
+            if self.switching:
+                return {"error": "a session switch is already in progress"}
+            self.switching = True
+        try:
+            return self._open_session(path)
+        finally:
+            with self.lock:
+                self.switching = False
+            self.maybe_dispatch()   # queued prompts continue in the opened session
+
+    def _open_session(self, path):
+        self._abort_and_settle()
+        self._reset_run_state()
+        try:
+            st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+        except TimeoutError as e:
+            return {"error": f"get_state before switch timed out: {e}"}
+        old_file = (st.get("data") or {}).get("sessionFile")
+        if old_file and os.path.realpath(old_file) == os.path.realpath(path):
+            return {"error": "that session is already open"}
+        try:
+            resp = self.send_cmd_with_response(
+                {"type": "switch_session", "sessionPath": path}, timeout=30)
+        except TimeoutError:
+            # The response may be lost while the switch still landed; ask pi
+            # what session it is on now instead of guessing (see _switch_to_new).
+            try:
+                st2 = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+                landed = (st2.get("data") or {}).get("sessionFile")
+                if not landed or os.path.realpath(landed) != os.path.realpath(path):
+                    raise TimeoutError("switch_session never landed")
+                resp = {"success": True, "data": {}}
+            except TimeoutError as e:
+                return {"error": f"switch_session failed: {e}"}
+        rdata = resp.get("data") or {}
+        if resp.get("success") is False or rdata.get("cancelled"):
+            why = ("cancelled by an extension" if rdata.get("cancelled")
+                   else (resp.get("error") or "pi refused the switch"))
+            return {"error": f"switch failed: {why}"}
+        # The opened file carries its own session_info name; read it back so the
+        # caller can report what the dashboard header will show.
+        name = None
+        try:
+            st3 = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+            name = (st3.get("data") or {}).get("sessionName")
+        except TimeoutError:
+            pass
+        log("SESSION OPENED: old=", old_file, "new=", path, "name=", name)
+        self.broadcast({"type": "session_switched", "archived": False,
+                        "newFile": path})
+        return {"ok": True, "oldFile": old_file, "newFile": path, "name": name}
+
     def model_set(self, provider, model_id):
         """Switch model and refresh the cached input capability."""
         resp = self.send_cmd_with_response({
@@ -1227,6 +1291,27 @@ class Handler(BaseHTTPRequestHandler):
                     archive=True, name=(body.get("name") or "").strip()[:80] or None))
             except Exception as e:
                 log("archive error:", e)
+                self._json({"error": str(e)}, 500)
+        elif path == "/opensession":
+            # Resume an EXISTING transcript. Same basename + dir allowlist and
+            # realpath containment as GET /session; pi does the switching.
+            fname = (body.get("file") or "").strip()
+            which = (body.get("dir") or "sessions").strip()
+            if which not in ("sessions", "archive") \
+                    or fname != os.path.basename(fname) \
+                    or not fname.endswith(".jsonl"):
+                self._json({"error": "bad request"}, 400)
+                return
+            root = os.path.realpath(SESSIONS_DIR if which == "sessions"
+                                    else ARCHIVE_DIR)
+            target = os.path.realpath(os.path.join(root, fname))
+            if not target.startswith(root + os.sep) or not os.path.isfile(target):
+                self._json({"error": "not found"}, 404)
+                return
+            try:
+                self._json(Handler.d.open_session(target))
+            except Exception as e:
+                log("opensession error:", e)
                 self._json({"error": str(e)}, 500)
         elif path == "/sessionname":
             name = (body.get("name") or "").strip()[:80]

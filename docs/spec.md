@@ -1103,3 +1103,34 @@ The UI checks ran the real `web/index.html` script under a stub DOM
    upgrade under a running daemon breaks the next prompt only. Recording
    `pi --version` (or the bundle mtime) at `start_pi()` and comparing on each
    run — restarting if it moved — would catch it before the user does.
+
+### 17.6 Resuming an existing session (built 2026-09-25)
+
+Diagnosing §17.5 exposed a gap: `switch_to_new` can only start a **fresh**
+session (a crafted header-only file), and a restart resumes the oldest file
+with the session id. So there was no way back to a specific transcript — the
+one that was live before a restart, or any past session the sidebar shows.
+
+`POST /opensession {file, dir}` closes that. Validation is identical to `GET
+/session` (basename + `sessions`/`archive` allowlist, `realpath` containment),
+then the daemon aborts any in-flight run, sends
+`{"type":"switch_session","sessionPath":<path>}` and broadcasts
+`session_switched`, so every open tab re-reads and re-renders — the same event
+`/newsession` and `/archive` already use. The opened file keeps its own
+messages and its own name (`sessionName` comes back in the response).
+
+| case | response |
+|---|---|
+| switched | `{"ok":true,"oldFile":…,"newFile":…,"name":…}` |
+| already open | `{"error":"that session is already open"}` |
+| `../` in `file`, `dir` outside the two roots, non-`.jsonl` | HTTP 400 |
+| missing file | HTTP 404 |
+
+Tested against a scripted fake pi (`switch_session` moves its reported
+`sessionFile`) — `/state` confirms the move, the journal logs `SESSION
+OPENED: old=… new=… name=…`, and all four rejection cases return 400/404.
+
+**Still open:** this switches *now* but does not survive a daemon restart —
+see §17.5 #1. The endpoint is the mechanism a fix would use at startup
+("resume the recorded active file"), which is why it exists before the rest of
+that fix landed.

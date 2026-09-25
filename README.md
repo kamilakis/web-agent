@@ -53,6 +53,11 @@ across surfaces.
     (thinking stripped, tool results capped), rendered by the same snapshot
     renderer as the live view; basename + dir allowlist, `realpath`
     containment, image blobs dropped
+  - `POST /opensession {file, dir}` — **resume an existing transcript** in
+    place: aborts any run in flight, switches pi onto that file and tells every
+    tab to refresh. Same allowlist/containment as `/session`; the session keeps
+    its own messages and name. (Needed because a restart resumes the oldest
+    file with the session id — docs/spec.md §17.5.)
   - `POST /newsession` / `POST /archive` — switch pi onto a fresh
     header-only session file (id preserved, so `--session-id` resume keeps
     working) and optionally move the old transcript to `archive/`. A run in
