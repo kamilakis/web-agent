@@ -58,10 +58,15 @@ across surfaces.
     renderer as the live view; basename + dir allowlist, `realpath`
     containment, image blobs dropped
   - `POST /opensession {file, dir}` — **resume an existing transcript** in
-    place: aborts any run in flight, switches pi onto that file and tells every
-    tab to refresh. Same allowlist/containment as `/session`; the session keeps
-    its own messages and name. (Needed because a restart resumes the oldest
-    file with the session id — docs/spec.md §17.5.)
+    place: switches pi onto that file and tells every tab to refresh. Same
+    allowlist/containment as `/session`; the session keeps its own messages and
+    name. A run in flight is stopped, and a Siri/Matrix caller waiting on it is
+    told the run was interrupted instead of timing out. Resuming from
+    `archive/` **moves the file back into `sessions/`** (so it is a normal live
+    session again and re-archiving works) — 409 if that name is already taken
+    there, and the file is moved back if the switch fails. An empty or
+    non-JSON file is refused with 422. (Needed because a restart resumes the
+    oldest file with the session id — docs/spec.md §17.5.)
   - `POST /newsession` / `POST /archive` — switch pi onto a fresh
     header-only session file (id preserved, so `--session-id` resume keeps
     working) and optionally move the old transcript to `archive/`. A run in
@@ -130,13 +135,24 @@ cd web-agent
 
 ## Tests
 
-No dependencies, no daemon, no fake pi — the page is a single file, so the
-tests pull the marked blocks out of `web/index.html` and run them under node:
+No dependencies, no network, and **nothing touches the live agent** — every
+suite starts a throwaway daemon on its own port with a fake `pi` on `PATH`:
 
 ```sh
-node tests/describeTool.test.js   # the plain-language tool descriptions
-node tests/toolRows.test.js       # row pairing: parallel calls, errors, reload
+bash tests/run-all.sh          # everything
+node tests/ui.test.js          # one suite
 ```
+
+| Suite | Covers |
+|---|---|
+| `describeTool.test.js` | the plain-language tool descriptions (§8.3) |
+| `toolRows.test.js` | tool rows: parallel calls, errors, live vs reloaded |
+| `ui.test.js` | the page under a stub DOM: error surfacing, resume, two tabs |
+| `opensession.test.sh` | resume against the daemon: T1–T8, T13 |
+| `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
+| `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
+
+See `tests/README.md` for the fake pi's controls and the known gaps.
 
 ## Configuration
 

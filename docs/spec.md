@@ -1234,10 +1234,64 @@ screenshot check (the dot is now a `background`-coloured element, so the emoji
 failure mode is structurally gone), and the `describeTool` cases for tools not
 seen in a real transcript. Parts A and C below are untouched.
 
-- **A. Resume** a past session: `/opensession` has no UI yet. It also has a
-  stale `model_input` after switches, an "already open" check that runs after
-  the abort, a resumed archive file listed twice, and interrupted Siri runs
-  that are never answered.
+### 18.2 Part A — resume a past session (built 2026-09-25)
+
+Clicking a past session still *views* it; the banner now carries **▶ Resume**,
+the only entry point, so what is being resumed is on screen before the user
+commits. Sidebar clicks keep meaning "view".
+
+What was wrong and is now fixed:
+
+| # | Bug | Fix |
+|---|---|---|
+| B1 | `model_input` (does the current model see images?) was cached across a switch, so after one the vision auto-switch believed the old model's capability — and §2.4 says the model has just been reset underneath it | `_reset_run_state()` drops the cache, which every switch path calls, so the next image prompt re-queries |
+| B2 | the model dropdown kept showing the model the user picked, not the one pi was actually on (§2.4) | `refreshHeader()` re-selects it from `/state`, adding the option if `/models` does not offer it |
+| B3 | opening the session that was already live killed its running reply, *then* reported "already open" | the `get_state` + same-file comparison runs before `_abort_and_settle()` |
+| B4 | `/opensession` checked only `isfile`, so an empty file became a new random-id session and a non-JSON one made pi throw | `_valid_session_file()` in the handler → 422 |
+| B5 | resuming from `archive/` left the live session in `archive/`: listed twice, its session dir wrong, "Archive" on it a silent no-op, and the restart fallback never saw it | resuming un-archives it (`os.replace` into `sessions/`), reporting `unarchived: true`; a same-named file there is 409; a switch that fails or is cancelled moves it back. `renderSessions()` also drops `active` from *Archived* |
+| B6 | `/sessions` flagged "active" by basename, so a name in both dirs was flagged twice | compares realpaths |
+| B7 | resuming what a *second* tab was viewing left that tab in read-only mode on the live session | the `session_switched` handler returns that tab to live when `newFile` is the file it is viewing |
+| B8 | a switch aborted a Siri/Matrix run, and `_reset_run_state()` cleared `busy` so the later `agent_settled` never settled it: the caller got nothing and timed out | the switch captures the waiting caller before the reset and delivers "⚠ Interrupted: the session was switched from the web dashboard." the way a give-up is delivered (result file or Matrix) |
+
+**§2.4 checked live against real pi 0.87.1** (throwaway state dir, no fake):
+started on the daemon's `--model` (`huggingface/zai-org/GLM-5.3-Flash`), set
+`anthropic/claude-opus-4-5` via `/model`, then resumed another transcript. The
+switch landed (`SESSION OPENED … new=…other.jsonl`) and `/state` went **back to
+`huggingface/zai-org/GLM-5.3-Flash`**. The model a transcript was using is *not*
+restored across a switch — B1/B2 were guarding a real reset. Re-applying the
+user's choice after a switch is still a deliberate follow-up (see the spec's
+§7).
+
+T9 (the 3 MB, 16-image transcript) is **not** in the automated suite: it needs a
+real model and a real context window. Not run here; it remains the one case that
+must be checked by hand on a small-context model.
+
+### 18.3 The harness finally exists
+
+`tests/` is checked in (§5 step 0 of the spec, four sessions late). No
+dependencies, no network, and **nothing touches the live agent**: every suite
+starts a throwaway daemon with its own state dir, its own port, a loopback bind
+and `tests/fakebin` first on `PATH`.
+
+```sh
+bash tests/run-all.sh
+```
+
+| Suite | Checks |
+|---|---|
+| `describeTool.test.js` | 47 — the §8.3 description table |
+| `toolRows.test.js` | 20 — §8 rows against a stub DOM |
+| `ui.test.js` | §17.4 error surfacing + T11/T12 (banner, resume, two tabs) |
+| `opensession.test.sh` | 43 — T1–T8, T13, B6 |
+| `errors.test.sh` | 6 — §17.4 regression |
+| `resume.test.sh` | 11 — §17.7 / T10 restart resume |
+
+The fake pi answers `get_state` (sessionFile, sessionName, model, messageCount),
+`switch_session` (ok/fail/cancel/timeout), `set_model`, `abort`, `clear_queue`,
+`get_messages`, and records **every** command it receives — so a test can assert
+what the daemon did *not* do (no abort before the "already open" check, no
+`switch_session` for an invalid target).
+
 - **C. Delete** non-live sessions (soft delete to `trash/`, purged after 30
   days). Note the purge has no owner: `janitor()` only re-checks dispatch, there
   is no `trash/` dir and no `AGENT_TRASH_DAYS` anywhere.

@@ -11,7 +11,13 @@ Written 2026-09-25 for a later agent to implement. Read `docs/spec.md` §17.5–
 first: they describe the `/opensession` endpoint and the `active-session` record
 that this builds on.
 
+> **Built 2026-09-25** — see `docs/spec.md` §18.2 for the B-list, the §2.4 live
+> check against real pi and the harness that now exists in `tests/`. T9 (the
+> 3 MB / 16-image transcript) is deliberately not automated and still needs a
+> hand check.
+
 ## 1. What works today
+
 
 | Capability | Where | State |
 |---|---|---|
@@ -19,19 +25,21 @@ that this builds on.
 | View a past transcript **read-only** | `GET /session?file=&dir=`, `openSession()` in `web/index.html` sets `viewing`, hides the composer, shows the "Viewing …" banner | ✅ |
 | New session / Archive current + new | `POST /newsession`, `POST /archive` → `switch_to_new()` | ✅ |
 | Rename the live session | `POST /sessionname` | ✅ |
-| **Resume** an existing transcript | `POST /opensession {file, dir}` → `open_session()` | ⚠ **backend only**: no UI calls it (curl only) |
+| **Resume** an existing transcript | `POST /opensession {file, dir}` → `open_session()`, called by the banner's **▶ Resume** button (`resumeViewed()` in `web/index.html`) | ✅ (built 2026-09-25) |
 | Resume survives a daemon restart | `$AGENT_SESSION_DIR/active-session` + `start_pi --session <path>` | ✅ (§17.7) |
 
-**Answer to "can I restore an archived session?"** Only with curl today:
+**Answer to "can I restore an archived session?"** View it, then press
+**▶ Resume** in the banner — it moves back out of `archive/` and becomes the
+live session. The equivalent by hand:
 
 ```sh
 curl -X POST http://127.0.0.1:8383/opensession \
      -d '{"file":"2026-09-19T09-50-46-734Z_siri-agent.jsonl","dir":"archive"}'
 ```
 
-In the dashboard, clicking an archived or previous session only **views** it.
-The job is to add the UI **and** fix the backend bugs below, several of which
-only show up once resuming is a one-tap action.
+Clicking an archived or previous session still only **views** it; resuming is
+always an explicit second step, so what is about to become the live session is
+on screen first.
 
 Naming: the UI says **Resume**, not "restore". The endpoint stays
 `/opensession`; do not rename it.

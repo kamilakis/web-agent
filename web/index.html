@@ -114,6 +114,13 @@ body {
   border:1px solid var(--border); border-radius:999px;
   padding:5px 12px; font:600 12px/1 var(--sans);
 }
+#banner #bannerResume {
+  flex:0 0 auto; cursor:pointer;
+  background:var(--accent); color:var(--accent-ink);
+  border:1px solid var(--border); border-radius:999px;
+  padding:5px 12px; font:600 12px/1 var(--sans);
+}
+#banner #bannerResume:disabled { opacity:.55; cursor:default; }
 #sbScrim { position:fixed; inset:0; z-index:35; background:rgba(0,0,0,.35); }
 @media (min-width:901px) { #sbScrim { display:none !important; } }
 @media (max-width:900px) {
@@ -412,6 +419,7 @@ footer {
 </header>
 <div id="banner" hidden>
   <span id="bannerTitle"></span>
+  <button id="bannerResume" type="button">▶ Resume</button>
   <button id="bannerBack" type="button">← Return to live</button>
 </div>
 <main id="log"></main>
@@ -439,7 +447,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-25.1';
+const UI_VERSION = '2026-09-25.2';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -557,6 +565,7 @@ const sbToggle = document.getElementById('sbToggle');
 const sbScrim = document.getElementById('sbScrim');
 const banner = document.getElementById('banner');
 const bannerTitle = document.getElementById('bannerTitle');
+const bannerResume = document.getElementById('bannerResume');
 const foot = document.getElementById('foot');
 let viewing = null;   // {file, dir, title} while a past session is open read-only
 let sessions;         // undefined = endpoint missing (pre-restart daemon), null = fetch failed
@@ -623,7 +632,9 @@ function renderSessions() {
   if (!Array.isArray(sessions) || !sessions.length) return;
   const active = sessions.find(s => s.active);
   const prev = sessions.filter(s => !s.active && s.dir === 'sessions');
-  const arch = sessions.filter(s => s.dir === 'archive');
+  // B5: an un-archived session is live now; without !s.active it would appear
+  // under both Running and Archived.
+  const arch = sessions.filter(s => s.dir === 'archive' && !s.active);
   if (active) {
     sessList.appendChild(el('div', 'sb-group', 'Running'));
     sessList.appendChild(sessionItem(active));
@@ -665,7 +676,25 @@ async function refreshHeader() {
   try {
     const st = await fetch('/state', {headers: H}).then(r => r.json());
     sessionName.textContent = st.sessionName || st.sessionId || '';
+    // B2: a switch puts pi back on AGENT_MODEL (§2.4), so the dropdown has to
+    // follow /state or it keeps showing the model the user picked before it.
+    applyModelToSelect(st.model);
   } catch {}
+}
+
+// Show `m` in the model dropdown, adding it if the list does not carry it
+// (AGENT_MODEL can be a model /models does not offer).
+function applyModelToSelect(m) {
+  if (!m || !m.provider || !m.id) return;
+  const key = m.provider + '|' + m.id;
+  const opts = Array.from(modelSel.options || []);
+  if (!opts.some(o => o.value === key)) {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = m.id;
+    modelSel.appendChild(opt);
+  }
+  modelSel.value = key;
 }
 
 async function returnToLive() {
@@ -674,6 +703,49 @@ async function returnToLive() {
   foot.hidden = false;
   renderSessions();
   await refreshLive();
+}
+
+// §4: the only way to resume — from the banner, so what is being resumed is on
+// screen before the user commits. Sidebar clicks keep meaning "view".
+async function resumeViewed() {
+  if (!viewing) return;
+  const v = viewing;
+  let q = 'Resume "' + (v.title || v.file) + '"?\n' +
+          'It becomes the live session for web, Siri and Matrix.';
+  if (working) q += '\nThe running reply will be stopped.';
+  if (v.dir === 'archive') q += '\nIt will move out of Archived.';
+  if (!confirm(q)) return;
+  bannerResume.disabled = true;
+  try {
+    const r = await fetch('/opensession', {
+      method: 'POST',
+      headers: {...H, 'Content-Type': 'application/json'},
+      body: JSON.stringify({file: v.file, dir: v.dir}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 404) {   // no such endpoint on an old daemon
+      sbMsg('resume needs a daemon restart');
+      bannerResume.disabled = false;
+      return;
+    }
+    if (data.error) {         // stay in view mode so the user can retry
+      sbMsg(data.error);
+      bannerResume.disabled = false;
+      return;
+    }
+    viewing = null;
+    banner.hidden = true;
+    foot.hidden = false;
+    mine = [];
+    resetStream();
+    setStatus(false);
+    await loadSessions();
+    await refreshHeader();    // B2: picks the model the switch left us on
+    await refreshLive();
+  } catch {
+    sbMsg('could not resume that session');
+  }
+  bannerResume.disabled = false;
 }
 
 async function doSwitch(kind) {
@@ -714,6 +786,7 @@ renameBtn.onclick = async () => {
   refreshHeader();
 };
 document.getElementById('bannerBack').onclick = returnToLive;
+bannerResume.onclick = resumeViewed;
 
 // The sidebar is a fixed 25vw (min 220px, max 420px) — no JS resize.
 
@@ -1160,7 +1233,14 @@ function onEvent(e) {
   if (t === 'session_switched') {
     loadSessions();
     refreshHeader();
-    if (!viewing) refreshLive();
+    // B7: another tab resuming the transcript we are viewing read-only — this
+    // tab is now looking at the live session, so leave view mode. (After an
+    // un-archive, viewing.dir is stale but the basename still matches.)
+    if (viewing && ev.newFile && ev.newFile.endsWith('/' + viewing.file)) {
+      returnToLive();
+    } else if (!viewing) {
+      refreshLive();
+    }
     return;
   }
   // While a past session is open, the live transcript keeps flowing but must

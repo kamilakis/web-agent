@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Fake `pi --mode rpc` for the web-agent test suite.
+
+Replays a scripted event sequence per prompt and answers the commands the
+daemon sends. Every command it receives is appended to $FAKE_PI_STATE_LOG (one
+JSON object per line), so a test can assert not only what the daemon did but
+what it *didn't* — "no abort was sent", "pi never received switch_session".
+
+Env:
+  FAKE_PI_SESSION      the transcript file get_state reports (created if absent)
+  FAKE_PI_MODEL        model id get_state reports            (default fake-model)
+  FAKE_PI_MODEL_INPUT  JSON list of input kinds              (default text+image)
+  FAKE_PI_SCENARIO     ok | error | errorbare | retry | hang
+  FAKE_PI_SWITCH       ok | fail | cancel | timeout  — how switch_session replies
+  FAKE_PI_ARGV         file to append this process's argv to
+  FAKE_PI_STATE_LOG    file to append every received command to
+  FAKE_PI_HANG_SECS    safety net for scenario=hang (default 20)
+"""
+import json
+import os
+import sys
+import time
+
+SCEN = os.environ.get("FAKE_PI_SCENARIO", "ok")
+SWITCH = os.environ.get("FAKE_PI_SWITCH", "ok")
+SESSION = os.environ.get("FAKE_PI_SESSION", "/tmp/fake-pi-session.jsonl")
+MODEL = os.environ.get("FAKE_PI_MODEL", "fake-model")
+MODEL_INPUT = json.loads(os.environ.get("FAKE_PI_MODEL_INPUT", '["text", "image"]'))
+MESSAGES = int(os.environ.get("FAKE_PI_MESSAGES", "4"))
+HANG_SECS = float(os.environ.get("FAKE_PI_HANG_SECS", "20"))
+
+if os.environ.get("FAKE_PI_ARGV"):
+    with open(os.environ["FAKE_PI_ARGV"], "a") as _f:
+        _f.write(" ".join(sys.argv[1:]) + "\n")
+
+STATE_LOG = os.environ.get("FAKE_PI_STATE_LOG")
+
+
+def log_cmd(cmd):
+    if not STATE_LOG:
+        return
+    try:
+        with open(STATE_LOG, "a") as f:
+            f.write(json.dumps(cmd) + "\n")
+    except OSError:
+        pass
+
+
+# Real pi creates the session file it reports over get_state; model that, or the
+# daemon's active-session tracking rightly refuses to record a phantom path.
+def ensure_session(path):
+    if os.path.exists(path):
+        return
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            f.write(json.dumps({"type": "session", "version": 3, "id": "fake",
+                                "timestamp": "2026-01-01T00:00:00.000Z",
+                                "cwd": os.getcwd()}) + "\n")
+    except OSError:
+        pass
+
+
+ensure_session(SESSION)
+name = os.environ.get("FAKE_PI_SESSION_NAME", "fake-session")
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def state(rid, streaming=False):
+    return {"type": "response", "id": rid, "command": "get_state", "success": True,
+            "data": {"model": {"id": MODEL, "input": MODEL_INPUT},
+                     "isStreaming": streaming,
+                     "sessionFile": SESSION, "sessionId": "fake",
+                     "sessionName": name, "messageCount": MESSAGES}}
+
+
+def run_prompt(rid):
+    """Emit one scripted run. `hang` leaves the run in flight until aborted."""
+    global SCEN
+    emit({"type": "response", "id": rid, "command": "prompt", "success": True})
+    emit({"type": "agent_start"})
+    if SCEN == "retry":
+        emit({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
+              "delayMs": 10, "errorMessage": "529 overloaded"})
+        emit({"type": "message_start",
+              "message": {"role": "assistant", "content": [], "stopReason": "pending"}})
+        emit({"type": "message_end",
+              "message": {"role": "assistant", "content": [], "stopReason": "error",
+                          "errorMessage": "529 overloaded"}})
+        SCEN = "ok"
+    if SCEN in ("error", "errorbare"):
+        emit({"type": "message_start",
+              "message": {"role": "assistant", "content": [], "stopReason": "pending"}})
+        if SCEN == "error":       # a partial answer that then died
+            emit({"type": "message_update",
+                  "assistantMessageEvent": {"type": "text_delta", "delta": "partial "}})
+        emit({"type": "message_end",
+              "message": {"role": "assistant", "content": [], "stopReason": "error",
+                          "errorMessage": "Cannot find module "
+                                          "'/x/dist/bundle/chunks/openai-"
+                                          "completions-EKZT2IH2.js'"}})
+        emit({"type": "agent_settled"})
+        return
+    emit({"type": "message_start",
+          "message": {"role": "assistant", "content": [], "stopReason": "pending"}})
+    emit({"type": "message_update",
+          "assistantMessageEvent": {"type": "text_delta", "delta": "All good."}})
+    if SCEN == "hang":            # in flight: agent_settled comes from abort()
+        return
+    emit({"type": "message_end",
+          "message": {"role": "assistant", "content": [{"type": "text", "text": "All good."}],
+                      "stopReason": "stop"}})
+    emit({"type": "agent_settled"})
+
+
+def abort_run():
+    """The Esc path: end the in-flight message and settle."""
+    emit({"type": "message_end",
+          "message": {"role": "assistant", "content": [], "stopReason": "aborted"}})
+    emit({"type": "agent_settled"})
+
+
+deadline = time.time() + HANG_SECS * 4
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        cmd = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    log_cmd(cmd)
+    rid = cmd.get("id")
+    t = cmd.get("type")
+
+    if t == "get_state":
+        emit(state(rid, streaming=(SCEN == "hang")))
+    elif t == "get_messages":
+        emit({"type": "response", "id": rid, "command": "get_messages",
+              "success": True, "data": {"messages": []}})
+    elif t == "switch_session":
+        if SWITCH == "fail":
+            emit({"type": "response", "id": rid, "command": "switch_session",
+                  "success": False, "error": "extension refused the switch"})
+        elif SWITCH == "cancel":
+            emit({"type": "response", "id": rid, "command": "switch_session",
+                  "success": True, "data": {"cancelled": True}})
+        elif SWITCH == "timeout":
+            pass                      # never answer; the daemon must ask get_state
+        else:
+            SESSION = cmd.get("sessionPath")
+            ensure_session(SESSION)
+            name = os.path.basename(SESSION)
+            # §2.4: a switch silently puts pi back on the daemon's --model.
+            # FAKE_PI_MODEL_AFTER_SWITCH models exactly that, unannounced.
+            if os.environ.get("FAKE_PI_MODEL_AFTER_SWITCH"):
+                _m = json.loads(os.environ["FAKE_PI_MODEL_AFTER_SWITCH"])
+                MODEL = _m.get("id", MODEL)
+                MODEL_INPUT = _m.get("input", MODEL_INPUT)
+            emit({"type": "response", "id": rid, "command": "switch_session",
+                  "success": True, "data": {"sessionFile": SESSION}})
+    elif t == "boot":
+        pass
+    elif t == "set_model":
+        MODEL = cmd.get("modelId") or MODEL
+        if "input" in cmd:            # optional override for the vision cache test
+            MODEL_INPUT = cmd["input"]
+        emit({"type": "response", "id": rid, "command": "set_model",
+              "success": True, "data": {"model": {"id": MODEL, "input": MODEL_INPUT}}})
+    elif t == "abort":
+        emit({"type": "response", "id": rid, "command": "abort", "success": True})
+        if os.environ.get("FAKE_PI_ABORT", "settle") == "settle":
+            abort_run()
+        # else: never settle — models a pi that hangs past the daemon's
+        # _abort_and_settle deadline, which is when B8 bites.
+    elif t == "clear_queue":
+        emit({"type": "response", "id": rid, "command": "clear_queue",
+              "success": True, "data": {"cleared": 0}})
+    elif t == "prompt":
+        run_prompt(rid)
+    elif t == "set_session_name":
+        name = cmd.get("name")
+        emit({"type": "response", "id": rid, "command": "set_session_name",
+              "success": True, "data": {"name": name}})
+    elif t == "get_available_models":
+        emit({"type": "response", "id": rid, "command": "get_available_models",
+              "success": True, "data": {"models": []}})
+    else:
+        emit({"type": "response", "id": rid, "command": t, "success": True,
+              "data": {}})
+    if time.time() > deadline:
+        break

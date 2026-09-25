@@ -651,6 +651,11 @@ class Daemon:
             self.last_error = None
             self.current_out_dir = None
             self.dispatch_map.clear()
+            # §2.4/B1: a switch silently puts pi back on the daemon's --model,
+            # whatever the user picked and whatever the vision auto-switch set.
+            # Dropping the cached capability makes the next image prompt
+            # re-query it instead of trusting a model we are no longer on.
+            self.model_input = None
 
     def switch_to_new(self, archive, name=None):
         """Switch pi onto a fresh session (see craft_session_file). The old
@@ -732,10 +737,14 @@ class Daemon:
         return {"ok": True, "oldFile": old_file, "newFile": new_file,
                 "archived": moved}
 
-    def open_session(self, path):
+    def open_session(self, path, unarchive=False):
         """Switch pi onto an EXISTING transcript (resume it in place, keeping
         its messages and its name). The caller has already validated the path
         and confined it to sessions/ or archive/.
+
+        `unarchive` means it came from archive/: resuming it moves it back to
+        sessions/ first, so it returns as a normal live session and can be
+        archived again later (B5).
 
         Why this exists: `switch_to_new` can only start a *fresh* session, and
         `--session-id` resume after a daemon restart picks the OLDEST file with
@@ -748,15 +757,16 @@ class Daemon:
                 return {"error": "a session switch is already in progress"}
             self.switching = True
         try:
-            return self._open_session(path)
+            return self._open_session(path, unarchive=unarchive)
         finally:
             with self.lock:
                 self.switching = False
             self.maybe_dispatch()   # queued prompts continue in the opened session
 
-    def _open_session(self, path):
-        self._abort_and_settle()
-        self._reset_run_state()
+    def _open_session(self, path, unarchive=False):
+        # --- B3: everything checkable comes BEFORE the abort. Opening the
+        # session that is already live used to kill its running reply and only
+        # then report that there was nothing to do.
         try:
             st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
         except TimeoutError as e:
@@ -764,6 +774,42 @@ class Daemon:
         old_file = (st.get("data") or {}).get("sessionFile")
         if old_file and os.path.realpath(old_file) == os.path.realpath(path):
             return {"error": "that session is already open"}
+        dest = None
+        if unarchive:
+            dest = os.path.join(SESSIONS_DIR, os.path.basename(path))
+            if os.path.exists(dest):
+                return {"error": "a session with that file name already exists "
+                                 "in sessions/", "status": 409}
+
+        self._abort_and_settle()
+        # --- B8: a run that did not settle cannot be delivered by settle(), and
+        # the reset below is about to forget who was waiting for it.
+        stale = self._interrupted_caller()
+        self._reset_run_state()
+        if stale:
+            self._notify_interrupted(stale)
+
+        prev = None
+        if unarchive:
+            try:
+                os.replace(path, dest)
+            except OSError as e:
+                return {"error": f"could not un-archive the session: {e}"}
+            log("SESSION UN-ARCHIVED:", path, "->", dest)
+            path, prev = dest, path
+
+        def rollback():
+            """A failed switch must leave the transcript where it was found.
+            The file is never deleted; if the move back fails it stays in
+            sessions/ and the log says so."""
+            if not prev:
+                return
+            try:
+                os.replace(path, prev)
+                log("SESSION SWITCH ROLLED BACK:", path, "->", prev)
+            except OSError as e:
+                log("rollback failed; the transcript is safe in sessions/:", e)
+
         try:
             resp = self.send_cmd_with_response(
                 {"type": "switch_session", "sessionPath": path}, timeout=30)
@@ -777,9 +823,11 @@ class Daemon:
                     raise TimeoutError("switch_session never landed")
                 resp = {"success": True, "data": {}}
             except TimeoutError as e:
+                rollback()
                 return {"error": f"switch_session failed: {e}"}
         rdata = resp.get("data") or {}
         if resp.get("success") is False or rdata.get("cancelled"):
+            rollback()
             why = ("cancelled by an extension" if rdata.get("cancelled")
                    else (resp.get("error") or "pi refused the switch"))
             return {"error": f"switch failed: {why}"}
@@ -791,11 +839,41 @@ class Daemon:
             name = (st3.get("data") or {}).get("sessionName")
         except TimeoutError:
             pass
-        log("SESSION OPENED: old=", old_file, "new=", path, "name=", name)
+        log("SESSION OPENED: old=", old_file, "new=", path, "name=", name,
+            *("unarchived=yes",) if prev else ())
         self.record_active_session(path)
         self.broadcast({"type": "session_switched", "archived": False,
-                        "newFile": path})
-        return {"ok": True, "oldFile": old_file, "newFile": path, "name": name}
+                        "newFile": path, "unarchived": bool(prev)})
+        return {"ok": True, "oldFile": old_file, "newFile": path, "name": name,
+                "unarchived": bool(prev)}
+
+    def _interrupted_caller(self):
+        """Who is waiting on the run a switch is about to discard, if anyone.
+
+        Read BEFORE _reset_run_state(): if settle() already ran, the fields are
+        empty and there is nothing to deliver — so this can never double-send.
+        """
+        with self.lock:
+            if not self.current_source:
+                return None
+            return {"source": self.current_source, "pid": self.current_id,
+                    "prompt": self.current_prompt}
+
+    def _notify_interrupted(self, who):
+        """Tell a Siri/Matrix caller their run was cut short by a switch. The
+        dashboard sees the switch itself over SSE."""
+        msg = "⚠ Interrupted: the session was switched from the web dashboard."
+        log("interrupted run, notifying:", who.get("source"), who.get("pid"))
+        if who.get("source") == "siri" and who.get("pid"):
+            rpath = os.path.join(STATE, "results", f"{who['pid']}.result")
+            os.makedirs(os.path.dirname(rpath), exist_ok=True)
+            with open(rpath, "w") as f:
+                f.write(msg)
+        elif who.get("source") == "matrix":
+            threading.Thread(
+                target=post_matrix,
+                args=(f"\U0001f916 {who.get('prompt') or ''}\n\n{msg}",),
+                daemon=True).start()
 
     def model_set(self, provider, model_id):
         """Switch model and refresh the cached input capability."""
@@ -1241,7 +1319,7 @@ class Handler(BaseHTTPRequestHandler):
         The active one is flagged by comparing against get_state's sessionFile."""
         try:
             st = Handler.d.send_cmd_with_response({"type": "get_state"}, timeout=10)
-            active = os.path.basename((st.get("data") or {}).get("sessionFile") or "")
+            active = os.path.realpath((st.get("data") or {}).get("sessionFile") or "")
         except TimeoutError:
             active = ""
         items = []
@@ -1256,7 +1334,10 @@ class Handler(BaseHTTPRequestHandler):
                 info = session_meta(os.path.join(root, n), which)
                 if not info:
                     continue
-                info["active"] = (n == active)
+                # B6: by path, not basename — the same name can exist in both
+                # dirs, and flagging both would list one session twice.
+                info["active"] = bool(active) and os.path.realpath(
+                    os.path.join(root, n)) == active
                 items.append(info)
         items.sort(key=lambda x: x.get("mtime") or 0, reverse=True)
         self._json({"sessions": items})
@@ -1421,8 +1502,17 @@ class Handler(BaseHTTPRequestHandler):
             if not target.startswith(root + os.sep) or not os.path.isfile(target):
                 self._json({"error": "not found"}, 404)
                 return
+            # B4: an empty file becomes a new random-id session and a non-JSON
+            # one makes pi throw, so neither is a resume target.
+            if not _valid_session_file(target):
+                self._json({"error": "not a resumable session file"}, 422)
+                return
             try:
-                self._json(Handler.d.open_session(target))
+                res = Handler.d.open_session(target, unarchive=(which == "archive"))
+                status = 200
+                if isinstance(res, dict) and res.get("error"):
+                    status = res.pop("status", 200)
+                self._json(res, status)
             except Exception as e:
                 log("opensession error:", e)
                 self._json({"error": str(e)}, 500)
