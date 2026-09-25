@@ -269,6 +269,7 @@ class Daemon:
         self.current_asked = None        # dispatch time, for task logs
         self.cur_text = []              # text deltas of the in-flight message
         self.last_text = None           # final assistant text of current run
+        self.last_error = None          # terminal error of the current run (§17)
         self.last_web_message = None    # last web prompt (for steer-turned-run case)
         self.last_web_asked = None
         self.model_input = None         # current model's input types (None = unknown)
@@ -341,6 +342,7 @@ class Daemon:
             self.current_asked = time.time()
             self.cur_text = []
             self.last_text = None
+            self.last_error = None
             self.req_seq += 1
             rid = f"fifo-{self.req_seq}"
             self.dispatch_map[rid] = {"source": source, "pid": pid, "prompt": prompt,
@@ -408,6 +410,7 @@ class Daemon:
                 self.current_asked = time.time()
                 self.cur_text = []
                 self.last_text = None
+                self.last_error = None
                 self.dispatch_map[rid] = {"source": "web", "pid": None,
                                           "prompt": message, "attempts": 0}
                 if images:
@@ -535,6 +538,7 @@ class Daemon:
             self.current_asked = None
             self.cur_text = []
             self.last_text = None
+            self.last_error = None
             self.current_out_dir = None
             self.dispatch_map.clear()
 
@@ -645,6 +649,7 @@ class Daemon:
                 self.current_id = None
                 self.current_asked = None
                 self.cur_text = []
+                self.last_error = None
             attempts = (info.get("attempts") or 0) + 1
         log("prompt rejected by pi:", err, "| attempt", attempts,
             "| prompt:", info.get("prompt"))
@@ -679,9 +684,11 @@ class Daemon:
             prompt = self.current_prompt
             pid = self.current_id
             answer = self.last_text
+            error = self.last_error
             asked = self.current_asked or time.time()
             out_dir = self.current_out_dir
             self.current_out_dir = None
+            self.last_error = None
             self.busy = False
             self.dispatch_pending = False
             self.dispatch_deadline = None
@@ -695,9 +702,15 @@ class Daemon:
         log("SETTLED. prompt=", prompt, "source=", source,
             "dur_s=", round(now - asked, 1),
             "answer_len=", len(answer or ""),
+            *(('error=' + error.replace("\n", " ")[:400],) if error else ()),
             "answer=", answer_1line[:400])
         delivered = {"siri": "spoken", "matrix": "matrix", "web": "web"}.get(source, "unknown")
-        task_path = self.write_task_log(pid, prompt, answer, asked, now, delivered)
+        # §17: an errored run must never be delivered as a silent empty answer.
+        # Siri/Matrix get an explicit failure line; the web dashboard renders
+        # the error from the message_end event (and from the snapshot) itself.
+        spoken = answer or (f"⚠ The agent failed: {error}" if error else "")
+        task_path = self.write_task_log(pid, prompt, answer, asked, now, delivered,
+                                        status="error" if error else "ok", error=error)
         if source == "siri" and pid:
             # Synchronous caller is polling for this file. If they consume it
             # (delete) before GRACE elapses, no Matrix message is sent — the
@@ -705,7 +718,7 @@ class Daemon:
             rpath = os.path.join(STATE, "results", f"{pid}.result")
             os.makedirs(os.path.dirname(rpath), exist_ok=True)
             with open(rpath, "w") as f:
-                f.write(answer or "")
+                f.write(spoken or "")
 
             def _grace():
                 time.sleep(GRACE)
@@ -714,7 +727,7 @@ class Daemon:
                         os.remove(rpath)
                     except OSError:
                         pass
-                    msg = f"🤖 {prompt}\n\n{answer}" if prompt else (answer or "")
+                    msg = f"🤖 {prompt}\n\n{spoken}" if prompt else (spoken or "")
                     post_matrix(msg)
                     with open(task_path, "a") as f:
                         f.write(f"note: caller did not pick up within window; "
@@ -723,7 +736,7 @@ class Daemon:
 
             threading.Thread(target=_grace, daemon=True).start()
         elif source == "matrix":
-            msg = f"🤖 {prompt}\n\n{answer}" if prompt else (answer or "")
+            msg = f"🤖 {prompt}\n\n{spoken}" if prompt else (spoken or "")
             threading.Thread(target=post_matrix, args=(msg,), daemon=True).start()
         elif source == "web":
             # §15: any image files the agent produced this turn go back to the
@@ -733,7 +746,8 @@ class Daemon:
                 self.broadcast({"type": "web_attachments", "files": files})
         self.maybe_dispatch()
 
-    def write_task_log(self, pid, prompt, answer, asked, settled_ts, delivered):
+    def write_task_log(self, pid, prompt, answer, asked, settled_ts, delivered,
+                       status="ok", error=None):
         os.makedirs(TASKS, exist_ok=True)
         if pid:
             path = os.path.join(TASKS, f"{pid}.log")
@@ -745,6 +759,9 @@ class Daemon:
             f.write(f"asked: {time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(asked))}\n")
             f.write(f"settled: {time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(settled_ts))}\n")
             f.write(f"duration_s: {round(settled_ts - asked, 1)}\n")
+            f.write(f"status: {status}\n")
+            if error:
+                f.write(f"error: {' '.join(error.split())}\n")
             f.write(f"delivered: {delivered}\n")
             f.write("answer:\n")
             if answer:
@@ -816,10 +833,29 @@ class Daemon:
                 if ame.get("type") == "text_delta":
                     self.cur_text.append(ame.get("delta", ""))
             elif t == "message_end":
+                m = ev.get("message") if isinstance(ev.get("message"), dict) else {}
                 buf = "".join(self.cur_text).strip()
                 if buf:
                     self.last_text = buf
                 self.cur_text = []
+                # §17: a failed assistant message ends with stopReason "error"
+                # (a provider error, or a pi whose bundle chunks were replaced by
+                # an in-place upgrade under the running process). That is a
+                # terminal failure, not an empty answer: record it so settle()
+                # can say so instead of reporting success with answer_len=0.
+                if m.get("role") == "assistant":
+                    if m.get("stopReason") == "error":
+                        err = (m.get("errorMessage") or "").strip() \
+                              or "the model returned an error"
+                        with self.lock:
+                            self.last_error = err
+                        log("RUN ERROR:", err.replace("\n", " "))
+                    elif m.get("stopReason") in ("stop", "toolUse", "length"):
+                        # pi retries provider errors automatically (auto_retry_*);
+                        # a later successful response means the run recovered, so
+                        # the earlier failure is no longer this run's outcome.
+                        with self.lock:
+                            self.last_error = None
             elif t == "agent_start":
                 # pi emits agent_start for EVERY low-level run, so one prompt
                 # produces several: one per auto-retry, one per compaction
@@ -847,6 +883,7 @@ class Daemon:
                         self.current_asked = self.last_web_asked or time.time()
                         self.cur_text = []
                         self.last_text = None
+                        self.last_error = None
                     # else: a continuation of the run already in flight. Keep
                     # source, prompt, caller id and accumulated text untouched.
             elif t == "agent_settled":
@@ -878,6 +915,9 @@ class Daemon:
                     # auto-cancels. The web UI will answer these in v2.
                     self.send_cmd({"type": "extension_ui_response",
                                    "id": ev.get("id"), "cancelled": True})
+            elif t == "auto_retry_start":
+                log("pi auto-retry", ev.get("attempt"), "of", ev.get("maxAttempts"),
+                    "in", ev.get("delayMs"), "ms:", ev.get("errorMessage"))
             elif t == "error":
                 log("pi error event:", ev.get("error"))
         log("pi stdout closed; exiting event loop")

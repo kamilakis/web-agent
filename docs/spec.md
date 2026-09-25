@@ -976,3 +976,130 @@ ask me to choose" → tap one → the agent acts on the choice.
 **v2**: 4) `choose`-tool extension, 5) daemon dialog routing + timeout,
 6) frontend dialog rendering, 7) multi-surface test (raise a dialog during a
 Siri run, answer it from the web page).
+
+---
+
+## 17. Failed runs are visible (built 2026-09-25)
+
+### 17.1 The bug (observed live)
+
+On 2026-09-25 every web prompt settled instantly with `dur_s= 0.1
+answer_len= 0` and no error anywhere:
+
+```
+[07:45:00] WEB PROMPT -> Hello new
+[07:45:00] SETTLED. prompt= Hello source= web dur_s= 0.0 answer_len= 0 answer=
+```
+
+The answer was not empty — it had **failed**. The transcript held the reason:
+
+```
+{"role":"assistant","content":[],"stopReason":"error","usage":{"input":0,...},
+ "errorMessage":"Cannot find module
+  '.../dist/bundle/chunks/openai-completions-EKZT2IH2.js'"}
+```
+
+pi had been upgraded in place to 0.87.1 four days earlier; the long-running
+`pi --mode rpc` process (started Sep 21) still held the previous bundle's chunk
+paths, so every prompt died before the first token. Cause was environmental, but
+the *silent* part was ours: `settle()` delivered `last_text` — empty — and
+reported success:
+
+- the dashboard drew a user bubble and nothing else,
+- Siri's result file got an empty string, so Siri spoke nothing,
+- Matrix posted `🤖 <prompt>` with a blank body,
+- `tasks/*.log` said `delivered: web` with `answer: (no text)`.
+
+An aborted run and a *failed* run were indistinguishable from a run that
+returned nothing, which is the one outcome a chat UI must never fake.
+
+### 17.2 Fix — `stopReason: "error"` is a run outcome
+
+A terminal errored assistant message (`message_end`, `role: "assistant"`,
+`stopReason: "error"`, `errorMessage`) is captured in `read_events()` into
+`self.last_error`, cleared on dispatch, on the first `agent_start` of a run, and
+by any later successful assistant message:
+
+```python
+if m.get("role") == "assistant":
+    if m.get("stopReason") == "error":
+        self.last_error = (m.get("errorMessage") or "").strip() or \
+                          "the model returned an error"
+        log("RUN ERROR:", err)
+    elif m.get("stopReason") in ("stop", "toolUse", "length"):
+        self.last_error = None      # pi auto-retried and recovered
+```
+
+The clear-on-success branch matters: pi retries provider errors by itself
+(`auto_retry_start`), so a failure followed by a good answer is a *recovered*
+run, not a failed one. `auto_retry_start` is now logged too, so the journal
+shows the retry even when it works.
+
+`settle()` then treats `error` as part of the outcome:
+
+| Surface | On failure |
+|---|---|
+| daemon log | `SETTLED. … error=<message>`, plus the `RUN ERROR:` line |
+| `tasks/*.log` | `status: error` and `error: <one-line message>` |
+| Siri | result file gets `⚠ The agent failed: <message>` (spoken, then the usual Matrix grace) |
+| Matrix | `🤖 <prompt>` + `⚠ The agent failed: <message>` |
+| web | the error bubble, rendered from `message_end` (live) and from the snapshot |
+
+A partial answer is preserved: if text streamed before the failure, that text is
+still what Siri/Matrix receive (`spoken = answer or failure line`) and the
+dashboard shows the partial text with the error bubble beneath it.
+
+### 17.3 Frontend
+
+`errorBubble(text)` renders `.bubble.err` — a danger-bordered block with a
+`⚠ agent error` heading and the message in monospace. It is used in two places,
+so a failure looks the same live and after a reload:
+
+- `message_end` with `stopReason === 'error'` → appended to the running
+  assistant message (after whatever streamed),
+- `renderSnapshot` → appended to that message's row, which previously rendered
+  *nothing* for an empty-content assistant message (the `if (msg.children.length)`
+  guard swallowed it).
+
+`docs/spec.md` §5.6 styling is respected: `--danger`/`--surface` tokens, no new
+palette.
+
+### 17.4 Test plan (executed 2026-09-25)
+
+Hermetic harness in `/tmp/errtest`: a fake `pi` on `PATH` replays a scripted RPC
+sequence (`agent_start`, `message_start`, `message_end{stopReason:error}`,
+`agent_settled`), and the daemon runs against a throwaway state dir, port and
+FIFO (`AGENT_SESSION_DIR=/tmp/…`, `AGENT_WEB_PORT=8399`, `AGENT_QUIET_MATRIX=1`).
+Nothing touches the live agent.
+
+| Scenario | Expected | Result |
+|---|---|---|
+| `error` + web | SSE carries the errored `message_end`; `status: error`; `RUN ERROR:` logged | ✅ |
+| `errorbare` + Siri | result file = `⚠ The agent failed: …` | ✅ |
+| `retry` (error → success) | `status: ok`, answer delivered, retry logged | ✅ |
+| `ok` + Siri | unchanged | ✅ |
+| UI: snapshot with an errored assistant message | one `.bubble.err`, heading + `errorMessage` | ✅ |
+| UI: live `message_end` error | error bubble after the partial text | ✅ |
+| UI: healthy turn | no error bubble | ✅ |
+
+The UI checks ran the real `web/index.html` script under a stub DOM
+(`node ui.test.js`), since no headless browser is installed.
+
+### 17.5 Follow-ups found while diagnosing (NOT fixed here)
+
+1. **Restart resumes the OLDEST session file, not the active one.**
+   `--session-id` resolves to *a* project session with that id when several
+   exist, and pi takes the **first match by filename (oldest)**, not the newest:
+   reproduced with two files (`2026-01-01…_testid.jsonl`,
+   `2026-06-01…_testid.jsonl`, created in both mtime orders) → pi opened the
+   January one. Live consequence: the daemon was on `/sessions/2026-09-14…`
+   (245 messages) after a restart, while the session the user had just created
+   ("Email quote", `2026-09-25T04-44-27-413Z_siri-agent.jsonl`) sat orphaned.
+   Every daemon restart silently rewinds to the first transcript of that id.
+   Fix candidates: stop leaving several files with the same id in the lookup
+   dir (rename the superseded ones), or persist the active file and pass
+   `--session <path>` instead of `--session-id`.
+2. **A stale pi bundle is invisible until a prompt runs.** An in-place `npm`
+   upgrade under a running daemon breaks the next prompt only. Recording
+   `pi --version` (or the bundle mtime) at `start_pi()` and comparing on each
+   run — restarting if it moved — would catch it before the user does.

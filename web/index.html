@@ -217,6 +217,17 @@ main {
   border-radius:19px; border-bottom-right-radius:6px;
 }
 .msg.assistant .bubble { line-height:1.62; }
+/* §17: a terminal run error (provider failure, broken pi bundle) is a first-class
+   transcript item, not a silent empty reply — it must survive a snapshot reload. */
+.msg.assistant .bubble.err {
+  border-left:2px solid var(--danger); background:var(--surface);
+  border-radius:8px; padding:9px 12px; line-height:1.45;
+}
+.bubble.err .errHead { font-weight:650; color:var(--danger); margin-bottom:4px; }
+.bubble.err .errBody {
+  font-family:var(--mono); font-size:12px;
+  white-space:pre-wrap; overflow-wrap:anywhere;
+}
 .bubble code {
   font-family:var(--mono); font-size:.88em;
   background:var(--surface); border-radius:5px; padding:1px 5px;
@@ -735,6 +746,16 @@ function ensureTxt() {
   return curTxt;
 }
 function endCaret() { if (curTxt) curTxt.classList.remove('streaming'); }
+// §17: pi reports a failed turn as an assistant message with stopReason "error"
+// and empty content. Rendering it (live and on snapshot reload) is what turns a
+// silent no-op — the daemon used to log dur_s=0.0, answer_len=0 — into a visible
+// failure.
+function errorBubble(text) {
+  const b = el('div', 'bubble err');
+  b.appendChild(el('div', 'errHead', '⚠ agent error'));
+  b.appendChild(el('div', 'errBody', String(text || 'unknown error')));
+  return b;
+}
 // Just enough markdown for what the agent writes. Escapes first, so the
 // transcript can never inject markup into the page.
 function mdToHtml(src) {
@@ -908,6 +929,7 @@ function renderSnapshot(msgs, readOnly) {
         }
         else if (c.type === 'toolCall') msg.appendChild(toolRow(c.name, c.arguments || c.input));
       }
+      if (m.stopReason === 'error') msg.appendChild(errorBubble(m.errorMessage));
       if (msg.children.length) logEl.appendChild(msg);
     } else if (m.role === 'toolResult') {
       const txt = textOf(content);
@@ -957,6 +979,11 @@ function onEvent(e) {
     }
   } else if (t === 'message_end') {
     endCaret();
+    const m = ev.message || {};
+    if (m.role === 'assistant' && m.stopReason === 'error') {
+      ensureMsg().appendChild(errorBubble(m.errorMessage));
+      scrollBottom();
+    }
   } else if (t === 'message_update') {
     const d = ev.assistantMessageEvent || {};
     if (d.type === 'text_delta') {

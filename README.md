@@ -39,6 +39,10 @@ across surfaces.
     the prompt, so the agent edits them with ffmpeg; results render inline
   - **interactive choices**: the agent can end a reply with a `choose` block
     that renders as tappable buttons
+  - **failures are loud**: a run that ends in a provider/runtime error
+    (`stopReason: "error"`) renders as an error block in the transcript — live
+    and after a reload — is logged as `status: error` in the task log, and is
+    spoken/posted as an explicit failure instead of a blank answer
 - **Session history sidebar** — every transcript pi writes stays on disk;
   the dashboard lists them (previous + archived), opens any of them
   read-only, and can **archive the running session** or **start a new one**
@@ -94,6 +98,23 @@ cd web-agent
    SSH* (`ssh <host> agent-task "Dictated Text"`, full path required) → Speak
    Text ← Shell Script Result.
 
+   ⚠ **Put personal settings in a drop-in, not in the unit.** `install.sh`
+   copies the generic `systemd/*.service` files over the installed units, so
+   `Environment=` lines added to a unit by hand are lost the next time it runs
+   (learned the hard way: a re-install dropped `AGENT_WEB_HOST` back to
+   `127.0.0.1` and emptied `AGENT_MATRIX_SENDERS`, i.e. the dashboard went
+   unreachable and the Matrix allowlist opened up). Use:
+
+   ```bash
+   mkdir -p ~/.config/systemd/user/agent-session.service.d
+   cat > ~/.config/systemd/user/agent-session.service.d/local.conf <<'EOF'
+   [Service]
+   Environment=AGENT_WEB_HOST=192.0.2.10
+   Environment=AGENT_MATRIX_CONFIG=%h/.config/web-agent/matrix
+   EOF
+   systemctl --user daemon-reload && systemctl --user restart agent-session
+   ```
+
 3. **chat**: open `http://<host>:8383` from a device on the private
    network. `AGENT_WEB_HOST` (default `127.0.0.1`) controls the bind address —
    set it to your VPN IP to reach the dashboard remotely.
@@ -147,9 +168,10 @@ run-state model, the vision-model auto-switch for image turns, and the
 interactive-choice convention ([`docs/choose-convention.md`](docs/choose-convention.md)).
 
 `docs/` also contains the design → external-LLM-review → build trail:
-[`spec-review.md`](docs/spec-review.md) (12 findings, all resolved) and
+[`spec-review.md`](docs/spec-review.md) (12 findings, all resolved),
 [`review-qwen72b.md`](docs/review-qwen72b.md) (an independent Qwen2.5-72B
-review of the revised spec).
+review of the revised spec), and [`spec.md`](docs/spec.md) §17 (failed runs are
+visible — the 2026-09-25 silent-failure incident and its fix).
 
 ## Acknowledgments
 
