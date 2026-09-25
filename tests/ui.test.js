@@ -56,6 +56,7 @@ function newTab() {
   const byId = {};
   const routes = {};
   const posts = [];
+  const confirms = [];   // what the user was asked, in order
   const document = {
     createElement: t => new Elem(t),
     createTextNode: t => { const e = new Elem('#text'); e.textContent = t; return e; },
@@ -84,12 +85,12 @@ function newTab() {
     encodeURIComponent, decodeURIComponent, parseInt, parseFloat, isNaN,
     Image: function () {}, Blob: function () {}, FileReader: function () {},
     AbortController: function () { this.abort = () => {}; this.signal = {}; },
-    confirm: () => true, prompt: () => '', alert: () => {},
+    confirm: (msg) => { confirms.push(String(msg)); return true; }, prompt: () => '', alert: () => {},
   };
   ctx.window = ctx; ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(js, ctx, {filename: 'index.html'});
-  return {ctx, byId, routes, posts};
+  return {ctx, byId, routes, posts, confirms};
 }
 const tick = () => new Promise(r => setTimeout(r, 0));
 const find = (node, cls, acc = []) => {
@@ -104,8 +105,8 @@ const BASE_ROUTES = (state) => ({
   '/messages': {messages: []},
   '/session': {messages: []},
   '/sessions': {sessions: [
-    {name: 'old.jsonl', dir: 'archive', title: 'Old session', active: false, mtime: 1},
-    {name: 'live.jsonl', dir: 'sessions', title: 'Live', active: true, mtime: 2},
+    {name: 'old.jsonl', dir: 'archive', title: 'Old session', active: false, mtime: 1, count: 2},
+    {name: 'live.jsonl', dir: 'sessions', title: 'Live', active: true, mtime: 2, count: 9},
   ]},
 });
 
@@ -239,8 +240,7 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(C.byId['banner'].hidden === false, 'C keeps viewing its own transcript');
   ok(vm.runInContext('viewing !== null', C.ctx) === true, 'and keeps viewing state');
 
-  console.log('=== B5: an un-archived session is not listed under Archived twice');
-  const D = newTab();
+  console.log('=== B5: an un-archived session is not listed under Archived twice');  const D = newTab();
   Object.assign(D.routes, BASE_ROUTES(stateA));
   D.routes['/sessions'] = {sessions: [
     {name: 'old.jsonl', dir: 'archive', title: 'Old session', active: true, mtime: 3},
@@ -250,6 +250,72 @@ console.log('=== snapshot reload: errored assistant message is visible');
   const labels = groups.map(g => g.textContent);
   ok(!labels.includes('Archived'), 'an active archive-flagged file is not shown as Archived');
   ok(labels.includes('Running'), 'it is shown as Running instead');
+
+  console.log('=== Part C: the Delete button');
+  const stateD = {model: {provider: 'anthropic', id: 'claude-opus-4'},
+                  sessionName: 'live session', isStreaming: false};
+  const E = newTab();
+  Object.assign(E.routes, BASE_ROUTES(stateD));
+  E.routes['POST /deletesession'] = {json: {ok: true, trashed: '/s/trash/old-123.jsonl'}};
+  await tick();
+  await E.ctx.openSession({name: 'old.jsonl', dir: 'archive', title: 'Old session'});
+  await tick();
+  await E.byId['bannerDelete'].onclick();
+  await tick();
+  const del = E.posts.find(p => p.path === '/deletesession');
+  ok(!!del, 'POSTed to /deletesession');
+  ok(JSON.stringify(del && del.body), JSON.stringify({file: 'old.jsonl', dir: 'archive'}),
+     'with the transcript that was on screen');
+  ok(/trash/.test(E.confirms[0] || '') && /purged|30 days/.test(E.confirms[0] || ''),
+     'the confirm explains the trash and the retention');
+  ok(/2 msgs/.test(E.confirms[0] || ''), 'and names the size of what is being deleted');
+  ok(E.byId['banner'].hidden === true, 'left view mode');
+  ok(vm.runInContext('viewing === null', E.ctx) === true, 'viewing cleared');
+  ok(E.byId['sbNote'].textContent === 'Deleted', 'and said so');
+
+  console.log('=== Part C: a refused delete keeps the view');
+  const F = newTab();
+  Object.assign(F.routes, BASE_ROUTES(stateD));
+  F.routes['POST /deletesession'] = {status: 409, json: {error: 'that is the live session — switch to another one first'}};
+  await tick();
+  await F.ctx.openSession({name: 'old.jsonl', dir: 'archive', title: 'Old session'});
+  await F.byId['bannerDelete'].onclick();
+  await tick();
+  ok(F.byId['banner'].hidden === false, 'still viewing');
+  ok(vm.runInContext('viewing !== null', F.ctx) === true, 'viewing kept');
+  ok(/live session/.test(F.byId['sbNote'].textContent), 'and the reason is shown');
+
+  console.log('=== D7: another tab deletes the transcript this one is viewing');
+  const G = newTab();
+  Object.assign(G.routes, BASE_ROUTES(stateD));
+  await tick();
+  await G.ctx.openSession({name: 'old.jsonl', dir: 'archive', title: 'Old session'});
+  ok(G.byId['banner'].hidden === false, 'G is viewing');
+  G.ctx.onEvent({data: JSON.stringify({type: 'session_deleted', file: 'old.jsonl', dir: 'archive'})});
+  await tick();
+  ok(G.byId['banner'].hidden === true, 'G left view mode');
+  ok(vm.runInContext('viewing === null', G.ctx) === true, 'G cleared viewing');
+  ok(/deleted/.test(G.byId['sbNote'].textContent), 'and was told why');
+
+  console.log('=== D7b: a different file being deleted leaves the viewer alone');
+  const H = newTab();
+  Object.assign(H.routes, BASE_ROUTES(stateD));
+  await tick();
+  await H.ctx.openSession({name: 'old.jsonl', dir: 'archive', title: 'Old session'});
+  H.ctx.onEvent({data: JSON.stringify({type: 'session_deleted', file: 'something-else.jsonl', dir: 'sessions'})});
+  await tick();
+  ok(H.byId['banner'].hidden === false, 'H keeps viewing');
+
+  console.log('=== Part C: an old daemon without the endpoint says so');
+  const I = newTab();
+  Object.assign(I.routes, BASE_ROUTES(stateD));
+  I.routes['POST /deletesession'] = {status: 404, json: {error: 'not found'}};
+  await tick();
+  await I.ctx.openSession({name: 'old.jsonl', dir: 'archive', title: 'Old session'});
+  await I.byId['bannerDelete'].onclick();
+  await tick();
+  ok(I.byId['banner'].hidden === false, 'stays in view mode');
+  ok(/daemon restart/.test(I.byId['sbNote'].textContent), 'and says a restart is needed');
 
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }

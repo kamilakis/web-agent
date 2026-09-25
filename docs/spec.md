@@ -1187,7 +1187,7 @@ daemon's resume decision is asserted directly. 17/17 pass.
 Regression suites re-run on the same binary: error surfacing (§17.4, 6/6),
 `/opensession` (11/11), dashboard renderer (`node ui.test.js`, 10/10).
 
-## 18. Dashboard: resume, delete, descriptive tool rows (spec'd 2026-09-25)
+## 18. Dashboard: resume, delete, descriptive tool rows (spec'd 2026-09-25, all three built)
 
 Full spec, bug lists and test plans:
 [`docs/spec-resume-session.md`](spec-resume-session.md).
@@ -1292,6 +1292,29 @@ The fake pi answers `get_state` (sessionFile, sessionName, model, messageCount),
 what the daemon did *not* do (no abort before the "already open" check, no
 `switch_session` for an invalid target).
 
-- **C. Delete** non-live sessions (soft delete to `trash/`, purged after 30
-  days). Note the purge has no owner: `janitor()` only re-checks dispatch, there
-  is no `trash/` dir and no `AGENT_TRASH_DAYS` anywhere.
+### 18.4 Part C — delete a session (built 2026-09-25)
+
+A **Delete** button in the banner, next to Resume: the transcript you are
+looking at is the one that goes, so it is never a guess. Soft delete — the file
+is moved to `$AGENT_SESSION_DIR/trash/` and the janitor purges it after
+`AGENT_TRASH_DAYS` (default 30). The daemon refuses the live session (409:
+switch away first) and refuses while a switch is in progress, so a delete cannot
+race an `/opensession` of the same file. `session_deleted` goes out over SSE; a
+tab viewing that file returns to live.
+
+**The purge had no owner and now does.** As flagged in §9.1's review: the
+`janitor()` thread existed but only re-checked dispatch, `TRASH_DIR` was never
+created and `AGENT_TRASH_DAYS` appeared nowhere in the code — so D6 could not
+have passed and trash would have grown forever. `purge_trash()` now runs on the
+same tick. Recovery before the purge is a plain `mv`; after it, the nightly
+`/home/nuc` restic snapshot is the only copy left.
+
+Attachments are **not** deleted, deliberately: `attachments/in|out|web-N…` are
+keyed by request id, not by session (README says so), so deleting a transcript
+leaves the pictures it referenced alone.
+
+Tests: `tests/delete.test.sh` (D1–D6, D8, 24 checks) and the Part C sections of
+`tests/ui.test.js` (the button, the confirm text, a refused delete, D7's
+two-tab case). `AGENT_JANITOR_INTERVAL=1` keeps D6 to a couple of seconds.
+Out of scope per the spec: bulk delete, an undelete UI, and auto-cleanup of
+header-only empty sessions.

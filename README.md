@@ -37,6 +37,12 @@ across surfaces.
   - **session history sidebar** — list, view, archive and create sessions;
     new sessions can be named at creation, and clicking the session name in
     the header renames the live one
+  - **resume** a past session from its banner ("▶ Resume"): it becomes the
+    live session for web, Siri and Matrix, and an archived one moves back out
+    of Archived. Any run it interrupts is answered rather than dropped
+  - **delete** a past session from the same banner ("Delete"), so what is
+    about to go is on screen first — a soft delete into `trash/`, purged after
+    30 days
   - **pictures**: attach from camera/roll (client-side downscale); the daemon
     auto-switches to a vision model when the session model is text-only
   - **image editing**: sent photos are saved to disk with their paths named in
@@ -73,6 +79,15 @@ across surfaces.
     flight is aborted first; a `session_switched` SSE event tells every open
     tab to refresh. RPC `new_session` was deliberately **not** used: it mints
     a random session id and would orphan the session on the next restart.
+  - `POST /deletesession {file, dir}` — **soft-delete** a past transcript: it
+    moves to `$AGENT_SESSION_DIR/trash/` with a timestamp suffix, and the
+    janitor purges trashed files older than `AGENT_TRASH_DAYS` (default 30
+    days). The live session is refused with 409 (switch away first), and so is
+    a delete that would race a switch. Until the purge it is recoverable with
+    a plain `mv`; after it, the nightly restic snapshot is the only copy.
+    **Attachments are NOT deleted** — files under `attachments/in|out|web-N…`
+    are keyed by request id, not by session, so a transcript and the pictures
+    it referred to are independent.
 
 ## Requirements
 
@@ -149,6 +164,7 @@ node tests/ui.test.js          # one suite
 | `toolRows.test.js` | tool rows: parallel calls, errors, live vs reloaded |
 | `ui.test.js` | the page under a stub DOM: error surfacing, resume, two tabs |
 | `opensession.test.sh` | resume against the daemon: T1–T8, T13 |
+| `delete.test.sh` | delete against the daemon: D1–D6, D8 |
 | `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
 | `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
 
@@ -163,6 +179,7 @@ nothing personal is baked in.
 |---|---|---|
 | `AGENT_PROVIDER` / `AGENT_MODEL` | `deepseek` / `deepseek-v4-pro` | pi provider and model |
 | `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
+| `AGENT_TRASH_DAYS` | `30` | days a deleted transcript stays in `trash/` before the janitor purges it |
 | `AGENT_SESSION_ID` | `siri-agent` | session id = memory key; change to wipe |
 | `AGENT_SESSION_NAME` | `siri-agent` | display name for new sessions (the web UI can name them per-session) |
 | `AGENT_TASK_WAIT` | `15` | seconds Siri holds the SSH call open |

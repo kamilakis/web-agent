@@ -121,6 +121,13 @@ body {
   padding:5px 12px; font:600 12px/1 var(--sans);
 }
 #banner #bannerResume:disabled { opacity:.55; cursor:default; }
+#banner #bannerDelete {
+  flex:0 0 auto; cursor:pointer;
+  background:var(--elev); color:var(--danger);
+  border:1px solid var(--border); border-radius:999px;
+  padding:5px 12px; font:600 12px/1 var(--sans);
+}
+#banner #bannerDelete:disabled { opacity:.55; cursor:default; }
 #sbScrim { position:fixed; inset:0; z-index:35; background:rgba(0,0,0,.35); }
 @media (min-width:901px) { #sbScrim { display:none !important; } }
 @media (max-width:900px) {
@@ -420,6 +427,7 @@ footer {
 <div id="banner" hidden>
   <span id="bannerTitle"></span>
   <button id="bannerResume" type="button">▶ Resume</button>
+  <button id="bannerDelete" type="button">Delete</button>
   <button id="bannerBack" type="button">← Return to live</button>
 </div>
 <main id="log"></main>
@@ -447,7 +455,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-25.2';
+const UI_VERSION = '2026-09-25.3';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -566,6 +574,7 @@ const sbScrim = document.getElementById('sbScrim');
 const banner = document.getElementById('banner');
 const bannerTitle = document.getElementById('bannerTitle');
 const bannerResume = document.getElementById('bannerResume');
+const bannerDelete = document.getElementById('bannerDelete');
 const foot = document.getElementById('foot');
 let viewing = null;   // {file, dir, title} while a past session is open read-only
 let sessions;         // undefined = endpoint missing (pre-restart daemon), null = fetch failed
@@ -748,6 +757,45 @@ async function resumeViewed() {
   bannerResume.disabled = false;
 }
 
+// §9: delete the transcript you are LOOKING at, so what gets removed is never
+// a guess. The daemon refuses the live session, so this cannot delete the
+// session the dashboard is attached to.
+async function deleteViewed() {
+  if (!viewing) return;
+  const v = viewing;
+  const meta = (Array.isArray(sessions) ? sessions : [])
+                 .find(s => s.name === v.file && s.dir === v.dir) || {};
+  const n = (meta.count != null) ? meta.count : '?';
+  const when = meta.mtime ? new Date(meta.mtime * 1000).toLocaleString() : 'unknown date';
+  if (!confirm('Delete "' + (v.title || v.file) + '" (' + n + ' msgs, ' + when + ')?\n' +
+               'It moves to the trash and is purged after 30 days.')) return;
+  bannerDelete.disabled = true;
+  try {
+    const r = await fetch('/deletesession', {
+      method: 'POST',
+      headers: {...H, 'Content-Type': 'application/json'},
+      body: JSON.stringify({file: v.file, dir: v.dir}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 404) {   // no such endpoint on an old daemon
+      sbMsg('delete needs a daemon restart');
+      bannerDelete.disabled = false;
+      return;
+    }
+    if (data.error) {
+      sbMsg(data.error);
+      bannerDelete.disabled = false;
+      return;
+    }
+    await returnToLive();
+    await loadSessions();
+    sbMsg('Deleted');
+  } catch {
+    sbMsg('could not delete that session');
+  }
+  bannerDelete.disabled = false;
+}
+
 async function doSwitch(kind) {
   const busyNote = working ? '\nThe running reply will be stopped.' : '';
   const q = kind === 'archive'
@@ -787,6 +835,7 @@ renameBtn.onclick = async () => {
 };
 document.getElementById('bannerBack').onclick = returnToLive;
 bannerResume.onclick = resumeViewed;
+bannerDelete.onclick = deleteViewed;
 
 // The sidebar is a fixed 25vw (min 220px, max 420px) — no JS resize.
 
@@ -1230,6 +1279,16 @@ function onEvent(e) {
   let ev;
   try { ev = JSON.parse(e.data); } catch { return; }
   const t = ev.type;
+  if (t === 'session_deleted') {
+    // Any tab: the list changed. The tab that was viewing it must not keep
+    // showing a transcript that no longer exists.
+    loadSessions();
+    if (viewing && ev.file === viewing.file) {
+      returnToLive();
+      sbMsg('that session was deleted');
+    }
+    return;
+  }
   if (t === 'session_switched') {
     loadSessions();
     refreshHeader();

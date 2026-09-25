@@ -20,8 +20,9 @@ its state, its session, its FIFO — is not reachable from here.
 | `fakebin/pi` | fake `pi --mode rpc`: scripted runs, switch outcomes, and a log of every command it received |
 | `describeTool.test.js` | §8.3 tool descriptions — pure function, pulled out of `web/index.html` |
 | `toolRows.test.js` | §8 tool rows against a stub DOM: parallel calls, errors, live vs reloaded |
-| `ui.test.js` | the whole page under a stub DOM: §17.4 error surfacing, Part A banner/resume (T11/T12) |
+| `ui.test.js` | the whole page under a stub DOM: §17.4 error surfacing, Part A banner/resume (T11/T12), Part C delete (D7) |
 | `opensession.test.sh` | Part A against the daemon: T1–T8, T13, B6 |
+| `delete.test.sh` | Part C against the daemon: D1–D6, D8 |
 | `errors.test.sh` | §17.4 regression: failed runs are surfaced, Siri gets a spoken failure |
 | `resume.test.sh` | §17.7 / T10: restart resumes the recorded transcript |
 
@@ -37,6 +38,8 @@ Set these in the environment before `start_daemon`:
 | `FAKE_PI_MODEL_INPUT` | JSON list | the `input` kinds `get_state` reports |
 | `FAKE_PI_MODEL_AFTER_SWITCH` | JSON `{id,input}` | models §2.4's silent model revert on switch |
 | `FAKE_PI_MESSAGES` | int | `messageCount`, which `/archive` checks |
+| `AGENT_TRASH_DAYS` | int | trash retention for `delete.test.sh` (default 30) |
+| `AGENT_JANITOR_INTERVAL` | int | set to `1` by `delete.test.sh` so D6 does not wait 15s a tick |
 
 Introspection: `pi_saw <type>`, `pi_count <type>`, `pi_last_switch` — the fake
 records everything the daemon sent, so a test can assert what did **not** happen

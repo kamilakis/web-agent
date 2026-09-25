@@ -336,6 +336,9 @@ Tier 1 already reads `args.description`, so Tier 2 needs no UI change.
 
 ## Part C — Delete a session
 
+> **Built 2026-09-25** — see `docs/spec.md` §18.4. The unowned purge §9.1
+> assumed is now owned: `purge_trash()` runs on the janitor tick.
+
 ### 9.1 Behaviour
 - **Only non-live sessions** can be deleted (Previous or Archived). To delete
   the live one, switch away first. The daemon enforces this: 409

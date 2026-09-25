@@ -57,6 +57,9 @@ TASKS = os.path.join(STATE, "tasks")
 LOG = os.path.join(STATE, "daemon.log")
 SESSIONS_DIR = os.path.join(STATE, "sessions")
 ARCHIVE_DIR = os.path.join(STATE, "archive")
+# Part C: a deleted transcript is MOVED here, not unlinked, and the janitor
+# empties it after AGENT_TRASH_DAYS. Nothing lists this directory.
+TRASH_DIR = os.path.join(STATE, "trash")
 # Which transcript pi is currently on, as an absolute path. Written on every
 # session switch and at startup, read by start_pi() — see resume_target().
 ACTIVE_FILE = os.path.join(STATE, "active-session")
@@ -99,10 +102,12 @@ VISION_PROVIDER, VISION_MODEL_ID = VISION_MODEL.split("/", 1)
 # forever, so a watchdog clears it and a janitor thread re-checks periodically.
 DISPATCH_TIMEOUT = int(os.environ.get("AGENT_DISPATCH_TIMEOUT", "30"))
 JANITOR_INTERVAL = int(os.environ.get("AGENT_JANITOR_INTERVAL", "15"))
+TRASH_DAYS = int(os.environ.get("AGENT_TRASH_DAYS", "30"))
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
 os.makedirs(STATE, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
+os.makedirs(TRASH_DIR, exist_ok=True)
 
 
 def _text_of(content):
@@ -847,6 +852,62 @@ class Daemon:
         return {"ok": True, "oldFile": old_file, "newFile": path, "name": name,
                 "unarchived": bool(prev)}
 
+    def delete_session(self, path, which):
+        """Soft-delete a transcript: move it to TRASH_DIR (Part C).
+
+        Takes the same guard as a session switch, so a delete cannot race an
+        /opensession of the same file (or its un-archive move). The live session
+        is refused — the caller has to switch away first.
+        """
+        with self.lock:
+            if self.switching:
+                return {"error": "a session switch is in progress — "
+                                 "try again in a moment", "status": 409}
+            self.switching = True
+        try:
+            return self._delete_session(path, which)
+        finally:
+            with self.lock:
+                self.switching = False
+            self.maybe_dispatch()
+
+    def _delete_session(self, path, which):
+        # The live session is not deletable. Check pi AND the record: right
+        # after a restart they can disagree, and either one being this file
+        # means deleting it would pull the floor out from under the daemon.
+        try:
+            st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+        except TimeoutError as e:
+            return {"error": f"get_state before delete timed out: {e}"}
+        live = (st.get("data") or {}).get("sessionFile")
+        try:
+            with open(ACTIVE_FILE, encoding="utf-8") as f:
+                rec = f.read().strip()
+        except OSError:
+            rec = ""
+        for candidate, why in ((live, "pi is on it"), (rec, "it is the recorded active session")):
+            if candidate and os.path.realpath(candidate) == os.path.realpath(path):
+                log("refusing to delete the live session:", path, "(", why, ")")
+                return {"error": "that is the live session — switch to "
+                                 "another one first", "status": 409}
+
+        base = os.path.basename(path)
+        stamp = int(time.time())
+        stem = base[:-len(".jsonl")] if base.endswith(".jsonl") else base
+        dest = os.path.join(TRASH_DIR, f"{stem}-{stamp}.jsonl")
+        n = 1
+        while os.path.exists(dest):     # two deletes in the same second
+            dest = os.path.join(TRASH_DIR, f"{stem}-{stamp}-{n}.jsonl")
+            n += 1
+        try:
+            os.makedirs(TRASH_DIR, exist_ok=True)
+            os.replace(path, dest)
+        except OSError as e:
+            return {"error": f"could not move the session to the trash: {e}"}
+        log("SESSION DELETED:", path, "->", dest)
+        self.broadcast({"type": "session_deleted", "file": base, "dir": which})
+        return {"ok": True, "trashed": dest}
+
     def _interrupted_caller(self):
         """Who is waiting on the run a switch is about to discard, if anyone.
 
@@ -1216,14 +1277,41 @@ class Daemon:
         log("web dashboard on http://%s:%d" % (WEB_HOST, WEB_PORT))
 
     def janitor(self):
-        """Periodically re-check dispatch, so a stuck pending guard heals on its
-        own instead of waiting for the next FIFO prompt."""
+        """Periodically re-check dispatch, so a stuck pending guard heals on
+        its own instead of waiting for the next FIFO prompt. Also ages out the
+        trash: soft delete is only a safety net if something eventually empties
+        it (Part C)."""
         while True:
             time.sleep(JANITOR_INTERVAL)
             try:
                 self.maybe_dispatch()
             except Exception as e:
                 log("janitor error:", e)
+            try:
+                self.purge_trash()
+            except Exception as e:
+                log("trash purge error:", e)
+
+    def purge_trash(self):
+        """Remove trashed transcripts older than TRASH_DAYS. Before that,
+        recovery is an ordinary `mv`; after it, the nightly restic snapshot is
+        the only copy left."""
+        cutoff = time.time() - TRASH_DAYS * 86400
+        purged = 0
+        try:
+            names = os.listdir(TRASH_DIR)
+        except OSError:
+            return 0
+        for n in names:
+            p = os.path.join(TRASH_DIR, n)
+            try:
+                if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+                    purged += 1
+                    log("TRASH PURGED:", p)
+            except OSError as e:
+                log("could not purge", p, e)
+        return purged
 
     def run(self):
         self.start_pi()
@@ -1515,6 +1603,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(res, status)
             except Exception as e:
                 log("opensession error:", e)
+                self._json({"error": str(e)}, 500)
+        elif path == "/deletesession":
+            # Soft-delete a past transcript. Same basename + dir allowlist and
+            # realpath containment as /opensession; the daemon refuses the live
+            # session and anything it cannot move to trash/.
+            fname = (body.get("file") or "").strip()
+            which = (body.get("dir") or "sessions").strip()
+            if which not in ("sessions", "archive") \
+                    or fname != os.path.basename(fname) \
+                    or not fname.endswith(".jsonl"):
+                self._json({"error": "bad request"}, 400)
+                return
+            root = os.path.realpath(SESSIONS_DIR if which == "sessions"
+                                    else ARCHIVE_DIR)
+            target = os.path.realpath(os.path.join(root, fname))
+            if not target.startswith(root + os.sep) or not os.path.isfile(target):
+                self._json({"error": "not found"}, 404)
+                return
+            try:
+                res = Handler.d.delete_session(target, which)
+                status = 200
+                if isinstance(res, dict) and res.get("error"):
+                    status = res.pop("status", 200)
+                self._json(res, status)
+            except Exception as e:
+                log("deletesession error:", e)
                 self._json({"error": str(e)}, 500)
         elif path == "/sessionname":
             name = (body.get("name") or "").strip()[:80]
