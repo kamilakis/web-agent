@@ -1187,10 +1187,17 @@ daemon's resume decision is asserted directly. 17/17 pass.
 Regression suites re-run on the same binary: error surfacing (§17.4, 6/6),
 `/opensession` (11/11), dashboard renderer (`node ui.test.js`, 10/10).
 
-## 18. Resume a past session from the dashboard (spec'd 2026-09-25, NOT built)
+## 18. Dashboard: resume, delete, descriptive tool rows (spec'd 2026-09-25, NOT built)
 
-`/opensession` (§17.6) has no UI yet, and resuming exposes several bugs: a
-stale `model_input` after a switch, an "already open" check that runs after
-the abort, a resumed archive file listed twice, and interrupted Siri runs never
-answered. The full spec, bug list and test plan are in
+Full spec, bug lists and test plans:
 [`docs/spec-resume-session.md`](spec-resume-session.md).
+- **A. Resume** a past session: `/opensession` has no UI yet. It also has a
+  stale `model_input` after switches, an "already open" check that runs after
+  the abort, a resumed archive file listed twice, and interrupted Siri runs
+  that are never answered.
+- **B. Descriptive tool rows**: one plain-language line per call with the
+  command behind a toggle. Also fixes the live/reload rendering bugs:
+  parallel calls on one `curTool` pointer, no arguments while streaming,
+  detached `result` rows, emoji dots on iOS.
+- **C. Delete** non-live sessions (soft delete to `trash/`, purged after 30
+  days).

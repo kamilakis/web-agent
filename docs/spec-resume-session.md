@@ -1,4 +1,11 @@
-# Resume a past session from the web dashboard — spec (not yet built)
+# Dashboard sessions & tool rows — spec (not yet built)
+
+Three features, one file: **Part A** resume a past session (§1–7), **Part B**
+descriptive tool rows (§8), **Part C** delete a session (§9). They share
+`web/index.html` and the fake-pi harness (§5 step 0), so build A → C → B, or B
+first if tool rows matter more. Each part stands alone.
+
+## Part A — Resume a past session
 
 Written 2026-09-25 for a later agent to implement. Read `docs/spec.md` §17.5–17.8
 first: they describe the `/opensession` endpoint and the `active-session` record
@@ -213,3 +220,162 @@ Hermetic (fake pi) unless marked **live**.
   reset **visible and correct**. Re-applying the chosen model after a switch
   (`model_set` after `switch_session`) is a one-line follow-up if the owner
   wants it. Ask before adding it.
+
+---
+
+## Part B — Descriptive tool rows
+
+### 8.1 What it looks like now (screenshots from 2026-09-25, iPhone Safari)
+
+- `docs/img-tool-rows-live.png`: **live stream.** Every row shows only the raw
+  tool name (`bash`, `mcp__memos__search_memos`). There is no argument and no
+  description, and some rows keep pulsing after they finished.
+- `docs/img-tool-rows-after-refresh.png`: **the same turn after a reload.**
+  Now rows show a one-line argument (`fleet`, `2Lg84ji2mv…`), and every result
+  is a **separate `result` row**, detached from its call.
+
+The transcript (`sessions/2026-09-25T11-40-08-282Z_siri-agent.jsonl`, "How many
+hosts are with ssh access") confirms the doubled rows are **parallel tool
+calls**: one assistant message carrying 2–3 `toolCall` blocks. They are not
+duplicates. The screenshots do show these rendering bugs:
+
+| # | Bug | Cause (`web/index.html`) |
+|---|---|---|
+| L1 | Live rows have no argument or detail | `toolcall_start` → `toolRow(d.toolName, null)`. Nothing fills it in later, although `toolcall_end` carries `toolCall.arguments` and `tool_execution_start` carries `args` |
+| L2 | With parallel calls, earlier rows pulse forever and outputs go to the wrong row | one `curTool` pointer. `tool_execution_update/_end` always hit the **last** row created. Key rows by `toolCallId` instead (`toolcall_end.toolCall.id`, `tool_execution_*.toolCallId`) |
+| L3 | Live and reloaded views differ | live writes the result **into** the call row's `.out` (replacing args). The snapshot renders `toolResult` as a separate `toolRow('result', …)` appended to `logEl`, so it lands outside the assistant message |
+| L4 | Status dot is a blue square on iOS, not a green/red/orange dot | `content:"⏺"` renders as an emoji on iOS, which ignores `color`. Use `"⏺︎"`, or better a CSS circle (`width/height:7px; border-radius:50%; background:currentColor`) |
+| L5 | Large vertical gaps | each tool step is its own `.msg.assistant` plus `details.tool` margins 10/12px. Tighten margins for consecutive tool rows |
+| L6 | Reloaded history can't pair results with calls | `session_messages()` (daemon, past sessions) keeps only `role` + `content` and drops `toolCallId`, `toolName`, `isError`. Live `/messages` passes them through. Keep them in both |
+
+### 8.2 Target
+
+**One row per tool call, in the same form live and after reload:**
+
+```
+● Searching memos for “ssh access”                 mcp memos ›
+   ▸ expanded:
+     call    {"query": "ssh access", "page_size": 30}
+     result  Search results for "ssh access": 4 memos…   (capped as today)
+```
+
+- **Summary line:** a plain-language description in the body font (not mono).
+  The tool name is a small dim tag on the right. A running row shows the
+  description with the pulsing dot. An error row is red with the first line of
+  the error.
+- **Expanded:** the exact call (the command for bash, JSON args otherwise)
+  **and** the result, labelled. This is the "toggle to see the actual command"
+  the owner asked to keep.
+- The result is attached to its call by `toolCallId`: live via
+  `tool_execution_end`, reloaded via the `toolResult` message's `toolCallId`.
+  There are no standalone `result` rows. Fall back to a standalone row only
+  when no call with that id is on screen (old snapshot, or truncated by
+  `MSG_SNAPSHOT=50`).
+
+### 8.3 Where descriptions come from
+
+**Tier 1 (build this): a deterministic client-side `describeTool(name, args)`.**
+It is a pure function in `index.html`, unit-tested with node, costs nothing,
+and works on every old transcript.
+
+| tool | description |
+|---|---|
+| `bash` | `args.description` if present (Tier 2); else a short form of the command: strip a leading `cd … &&`, take the first command, e.g. `Running ls /home/nuc/assistant`, ellipsised at ~60 chars |
+| `read` / `write` / `edit` | `Reading notes.md` / `Writing …` / `Editing …` (basename; full path in the expanded view) |
+| `grep` | `Searching files for “pattern”` |
+| `find` | `Finding files named “pattern”` |
+| `ls` | `Listing <dir>` |
+| `mcp__memos__search_memos` | `Searching memos for “<query>”` |
+| `mcp__memos__get_memo` | `Opening memo <first 8 of id>…` |
+| other `mcp__<server>__<tool>` | `<Tool words> (<server>)` + first string arg, e.g. `List labels (gmail): inbox` |
+| anything else | tool name with `_` → space, sentence case, + `argPreview(args)` |
+
+Keep the table in one object literal so new MCP tools are one line each. While
+the arguments are still streaming (`toolcall_start` → `toolcall_end`), show
+`Preparing <tool words>…`.
+
+**Tier 2 (optional, gated): model-written descriptions for `bash`.** This is
+Claude Code's approach: bash takes an optional `description` ("what this
+does, in 5–10 words") and the UI shows it. pi 0.87.1's bash schema
+(`dist/core/tools/bash.js`) has only `command` and `timeout`. Options, in order:
+1. A pi extension (`~/.pi/agent/extensions/tool-descriptions/`) that
+   **re-registers `bash`** with the built-in implementation plus an optional
+   `description` string, which the model fills and the tool ignores.
+   **Verify first** that `pi.registerTool` may shadow a built-in name. The
+   docs don't say, and the runner rejects conflicting *shortcuts*, so it may
+   reject tools too.
+2. If shadowing is not allowed: skip Tier 2. Don't prompt-engineer "narrate
+   before each tool call": it costs tokens on every turn, and Siri answers
+   would start narrating.
+Tier 1 already reads `args.description`, so Tier 2 needs no UI change.
+
+### 8.4 Tests
+- node unit table for `describeTool` covering every row above, with missing or
+  odd args (`null`, non-string query, an empty command).
+- Fake-pi stream with **three parallel calls**, results arriving in reverse
+  order: each row gets its own result and ends done, none keeps pulsing (L2).
+- One error result → that row is red, the others green.
+- Render the same turn live and from `/messages` → identical DOM row count and
+  summaries (L3/L6). Same for `GET /session` on a past transcript.
+- Visual: iPhone Safari screenshot shows coloured dots, not emoji squares (L4).
+- Matrix/Siri unaffected (the change is UI-only, plus the L6 pass-through).
+
+---
+
+## Part C — Delete a session
+
+### 9.1 Behaviour
+- **Only non-live sessions** can be deleted (Previous or Archived). To delete
+  the live one, switch away first. The daemon enforces this: 409
+  `{"error":"that is the live session — switch to another one first"}`.
+- **Soft delete:** move the file to `$AGENT_SESSION_DIR/trash/` (not listed
+  anywhere). The janitor purges trash files older than 30 days
+  (`AGENT_TRASH_DAYS`, default 30). There is no undelete UI in v1. Recovery is
+  `mv` from `trash/`, or restic later: `~/.local/share` is inside the nightly
+  `/home/nuc` backup, so a purged file stays in snapshots for the 14/8/12
+  retention.
+- Attachment files (`attachments/in|out/web-N…`) are keyed by request id, not
+  by session, so they are **not** deleted. Say so in the README.
+
+### 9.2 Endpoint: `POST /deletesession {file, dir}`
+- Validation identical to `/opensession`: basename, `sessions|archive`
+  allowlist, realpath containment → 400/404.
+- Take the `switching` guard. Refuse with 409 while a switch is in progress,
+  so a delete can't race an `/opensession` of the same file (and Part A's
+  un-archive move).
+- Inside the guard: `get_state` → if realpath equals the live `sessionFile`,
+  return 409. Also refuse if it equals the `active-session` record, in case the
+  record and pi disagree right after a restart.
+- `os.replace` into `trash/`, adding a `-<unix-ts>` suffix before `.jsonl` to
+  avoid collisions. Log `SESSION DELETED: <path> -> <trash path>`.
+  Broadcast `{"type":"session_deleted","file":<basename>,"dir":<dir>}`.
+- Response `{"ok":true,"trashed":<path>}`.
+
+### 9.3 UI
+- A **Delete** button in the "Viewing …" banner, next to Resume (Part A §4).
+  It deletes the transcript you are looking at, so what gets deleted is never
+  a guess. It is hidden for the live session, which can't be viewed in banner
+  mode anyway.
+- `confirm('Delete "<title>" (<n> msgs, <date>)? It moves to the trash and is
+  purged after 30 days.')`
+- On success: `returnToLive()`, `loadSessions()`, `sbMsg('Deleted')`.
+- On the `session_deleted` event in any tab: `loadSessions()`. If that tab is
+  viewing that file, `returnToLive()` + `sbMsg('that session was deleted')`.
+- Old daemon (404) → `sbMsg('delete needs a daemon restart')`.
+
+### 9.4 Tests
+| # | Case | Expected |
+|---|---|---|
+| D1 | delete a Previous session | 200, file in `trash/`, gone from `/sessions`, SSE `session_deleted` |
+| D2 | delete an Archived session | same |
+| D3 | delete the live session | 409, file untouched |
+| D4 | delete while `/opensession` is mid-switch | 409 |
+| D5 | traversal / bad dir / missing | 400/404 |
+| D6 | trash file 31 days old + janitor tick | purged; a 29-day-old one stays |
+| D7 | tab A viewing X, tab B deletes X | A returns to live with the notice |
+| D8 | restart after deleting the newest non-live file | restart still resumes the recorded active file (§17.7 unaffected) |
+
+### 9.5 Out of scope
+Bulk delete, an undelete UI, auto-cleanup of header-only empty sessions (e.g.
+`sessions/2026-09-15T06-15-17-445Z…`, 661 bytes). The last one is a reasonable
+follow-up.
