@@ -1186,3 +1186,11 @@ daemon's resume decision is asserted directly. 17/17 pass.
 
 Regression suites re-run on the same binary: error surfacing (§17.4, 6/6),
 `/opensession` (11/11), dashboard renderer (`node ui.test.js`, 10/10).
+
+## 18. Resume a past session from the dashboard (spec'd 2026-09-25, NOT built)
+
+`/opensession` (§17.6) has no UI yet, and resuming exposes several bugs: a
+stale `model_input` after a switch, an "already open" check that runs after
+the abort, a resumed archive file listed twice, and interrupted Siri runs never
+answered. The full spec, bug list and test plan are in
+[`docs/spec-resume-session.md`](spec-resume-session.md).
