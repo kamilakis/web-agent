@@ -357,6 +357,17 @@ footer {
   flex:0 0 auto; background:var(--bg); border-top:1px solid var(--border);
   padding:9px 12px calc(10px + env(safe-area-inset-bottom));
 }
+/* §20 usage: one dim line between the transcript and the composer. It has to
+   survive a phone width, so the balance and today's spend are on it and the
+   rest (tokens, session total, source) is in the title and the tap toast. */
+#usage {
+  flex:0 0 auto; cursor:pointer;
+  padding:5px 14px 6px;
+  color:var(--dim); font:500 10.5px/1.35 var(--mono);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+#usage:active { color:var(--text); }
+#usage.warn { color:var(--danger); }
 #compose {
   display:flex; align-items:center; gap:7px;
   background:var(--elev); border:1px solid var(--border);
@@ -442,6 +453,7 @@ footer {
   <button id="bannerBack" type="button">← Return to live</button>
 </div>
 <main id="log"></main>
+<div id="usage" class="usage" hidden></div>
 <footer id="foot">
   <div id="preview" hidden></div>
   <form id="compose" autocomplete="off">
@@ -466,7 +478,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-26.1';
+const UI_VERSION = '2026-09-26.2';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -587,7 +599,9 @@ const bannerTitle = document.getElementById('bannerTitle');
 const bannerResume = document.getElementById('bannerResume');
 const bannerDelete = document.getElementById('bannerDelete');
 const buildBadge = document.getElementById('buildBadge');
+const usageBar = document.getElementById('usage');
 let buildInfo = null;   // GET /version: what the daemon says it is
+let usageInfo = null;   // GET /usage: tokens, cost, and the account balance
 const foot = document.getElementById('foot');
 let viewing = null;   // {file, dir, title} while a past session is open read-only
 let sessions;         // undefined = endpoint missing (pre-restart daemon), null = fetch failed
@@ -703,6 +717,7 @@ async function refreshHeader() {
     applyModelToSelect(st.model);
   } catch {}
   loadBuild();
+  loadUsage();     // a switch can change the model (and the balance behind it)
 }
 
 // The build badge (top right). "Keep versioning" is only useful if the running
@@ -739,6 +754,83 @@ function renderBuildBadge() {
   buildBadge.title = bits.join(' · ');
 }
 buildBadge.onclick = () => sbMsg(buildBadge.title, 8000);
+
+// §20 The usage line. The cost comes from pi's own `usage` blocks in the
+// transcript, which every provider writes, so it keeps working when the model
+// changes; the balance is whatever the current provider can be asked (see
+// GET /usage), and simply goes missing when there is nothing to ask.
+function money(v, cur, minor) {
+  if (v == null || v === '') return '\u2014';
+  const sym = {USD: '$', EUR: '\u20ac', GBP: '\u00a3'}[(cur || '').toUpperCase()] ||
+              ((cur || '') + ' ');
+  if (minor != null) v = (Number(v) / Math.pow(10, minor)).toFixed(2);
+  return sym + v;       // the helper sends decimal strings; never re-round them
+}
+function usd(n) {
+  if (!n) return '$0';
+  return '$' + (n < 0.01 ? n.toFixed(4) : n.toFixed(2));
+}
+function tokens(n) {
+  if (!n) return '0';
+  return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M'
+       : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+}
+async function loadUsage() {
+  try {
+    const r = await fetch('/usage', {headers: H});
+    usageInfo = r.ok ? await r.json() : null;
+  } catch {
+    usageInfo = null;
+  }
+  renderUsage();
+}
+function renderUsage() {
+  const u = usageInfo;
+  if (!u || u.error) { usageBar.hidden = true; return; }
+  usageBar.hidden = false;
+  usageBar.classList.toggle('warn', !!(u.balance && !u.balance.ok));
+  const b = u.balance || {};
+  const s = u.session || {}, t = u.today || {};
+  const cur = b.currency;
+
+  const bits = [];
+  if (b.ok) {
+    bits.push(money(b.total, cur) + ' left');
+    if (b.spent != null) bits.push('today ' + usd(t.cost));
+  } else if (b.err) {
+    bits.push('balance unavailable');
+  } else if (t.cost) {
+    bits.push('today ' + usd(t.cost));
+  }
+  usageBar.textContent = (u.model || u.provider || 'usage') +
+                         (bits.length ? ' \u00b7 ' + bits.join(' \u00b7 ') : '');
+
+  const full = [];
+  full.push('model  ' + (u.model || '?') + (u.provider ? ' (' + u.provider + ')' : ''));
+  if (b.ok) {
+    full.push('balance  ' + money(b.total, cur) + ' left' +
+              (b.topped_up != null ? '  (topped up ' + money(b.topped_up, cur) + ')' : ''));
+    if (b.spent != null) {
+      full.push('spent  ' + usd(b.spent) + (b.topup_total != null ? ' of ' + usd(b.topup_total) : '') +
+                ' since the last top-up');
+    }
+    if (b.cmd) full.push('source  ' + b.cmd);
+  } else if (b.err) {
+    full.push('balance  unavailable: ' + b.err);
+  } else {
+    full.push('balance  no helper for ' + (u.provider || 'this provider') +
+              ' (set AGENT_USAGE_CMD)');
+  }
+  full.push('today  ' + usd(t.cost) + '  \u00b7  ' + t.messages + ' turns  \u00b7  ' +
+            tokens(t.input) + ' in / ' + tokens(t.output) + ' out');
+  full.push('session  ' + usd(s.cost) + '  \u00b7  ' + s.messages + ' turns  \u00b7  ' +
+            tokens(s.input) + ' in / ' + tokens(s.output) + ' out' +
+            (s.cache_read ? ' / ' + tokens(s.cache_read) + ' cached' : ''));
+  const fam = Object.keys(s.models || {});
+  if (fam.length > 1) full.push('models  ' + fam.join(', '));
+  usageBar.title = full.join('\n');
+}
+usageBar.onclick = () => sbMsg(usageBar.title.replace(/\n/g, ' \u00b7 '), 9000);
 
 // Show `m` in the model dropdown, adding it if the list does not carry it
 // (AGENT_MODEL can be a model /models does not offer).
@@ -1567,6 +1659,8 @@ console.info('[web-agent] dashboard ui ' + UI_VERSION);
   connectSSE();
   loadSessions();
   loadBuild();
+  loadUsage();
+  setInterval(loadUsage, 60000);   // the daemon caches; this is a local read
 })();
 </script>
 </body>

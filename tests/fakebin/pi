@@ -25,6 +25,7 @@ SCEN = os.environ.get("FAKE_PI_SCENARIO", "ok")
 SWITCH = os.environ.get("FAKE_PI_SWITCH", "ok")
 SESSION = os.environ.get("FAKE_PI_SESSION", "/tmp/fake-pi-session.jsonl")
 MODEL = os.environ.get("FAKE_PI_MODEL", "fake-model")
+PROVIDER = os.environ.get("FAKE_PI_PROVIDER", "fake")
 MODEL_INPUT = json.loads(os.environ.get("FAKE_PI_MODEL_INPUT", '["text", "image"]'))
 MESSAGES = int(os.environ.get("FAKE_PI_MESSAGES", "4"))
 HANG_SECS = float(os.environ.get("FAKE_PI_HANG_SECS", "20"))
@@ -72,7 +73,8 @@ def emit(obj):
 
 def state(rid, streaming=False):
     return {"type": "response", "id": rid, "command": "get_state", "success": True,
-            "data": {"model": {"id": MODEL, "input": MODEL_INPUT},
+            "data": {"model": {"id": MODEL, "provider": PROVIDER,
+                                "input": MODEL_INPUT},
                      "isStreaming": streaming,
                      "sessionFile": SESSION, "sessionId": "fake",
                      "sessionName": name, "messageCount": MESSAGES}}

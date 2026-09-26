@@ -349,7 +349,62 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(!M.byId['buildBadge'].textContent.includes('not found'), 'and does not render the 404 body');
   ok(/unknown/.test(M.byId['buildBadge'].title), 'and says the daemon version is unknown');
 
+  console.log('=== Part 20: the usage line');
+  const U = newTab();
+  Object.assign(U.routes, BASE_ROUTES(stateD));
+  U.routes['/usage'] = {json: {
+    provider: 'deepseek', model: 'deepseek-flash',
+    session: {messages: 322, input: 400000, output: 20000, cache_read: 380000, cost: 0.8416,
+              models: {'deepseek-flash': 322}},
+    today: {messages: 12, input: 5000, output: 900, cost: 0.0431},
+    balance: {ok: true, currency: 'USD', total: '5.90', topped_up: '5.00',
+              spent: 12.34, topup_total: 50, cmd: '/x/deepseek-usage'},
+  }};
+  await tick();
+  ok(U.byId['usage'].hidden === false, 'the usage line is shown');
+  const txt = U.byId['usage'].textContent;
+  ok(txt.includes('deepseek-flash'), 'names the model');
+  ok(txt.includes('$5.90 left'), 'shows the credit left');
+  ok(txt.includes('today $0.04'), 'and what today has cost');
+  ok(/session  \$0\.84/.test(U.byId['usage'].title), 'the title carries the session total');
+  ok(/322 turns/.test(U.byId['usage'].title), 'and the turn count');
+  ok(/deepseek-usage/.test(U.byId['usage'].title), 'and which helper supplied the balance');
+
+  console.log('=== Part 20: a provider with no balance helper');
+  const V = newTab();
+  Object.assign(V.routes, BASE_ROUTES(stateD));
+  V.routes['/usage'] = {json: {
+    provider: 'anthropic', model: 'claude-opus-4',
+    session: {messages: 10, input: 1000, output: 200, cost: 0.5},
+    today: {messages: 2, input: 100, output: 20, cost: 0.05},
+  }};
+  await tick();
+  ok(V.byId['usage'].hidden === false, 'the line is still shown');
+  ok(V.byId['usage'].textContent.includes('today $0.05'), 'with the local cost');
+  ok(!V.byId['usage'].textContent.includes('left'), 'and no invented balance');
+  ok(/no helper for anthropic/.test(V.byId['usage'].title), 'the title says why');
+
+  console.log('=== Part 20: a failed balance and an old daemon');
+  const W = newTab();
+  Object.assign(W.routes, BASE_ROUTES(stateD));
+  W.routes['/usage'] = {json: {
+    provider: 'deepseek', model: 'deepseek-flash',
+    session: {messages: 1, input: 10, output: 5, cost: 0.01},
+    today: {messages: 1, input: 10, output: 5, cost: 0.01},
+    balance: {ok: false, err: 'http error (curl 22)'},
+  }};
+  await tick();
+  ok(W.byId['usage'].textContent.includes('balance unavailable'), 'says so');
+  ok(W.byId['usage'].classList.contains('warn'), 'and is flagged');
+
+  const X = newTab();
+  Object.assign(X.routes, BASE_ROUTES(stateD));
+  X.routes['/usage'] = {status: 404, json: {error: 'not found'}};
+  await tick();
+  ok(X.byId['usage'].hidden === true, 'an old daemon hides the line rather than guessing');
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');
+  process.exit(0);   // the page sets intervals; do not wait for the loop to drain
 })();

@@ -1390,3 +1390,39 @@ Fixes:
 
 Readiness is `/state`, not the unit's active state: it round-trips `get_state`
 to pi, so a 504 means "up but not ready for chat".
+
+## 20. The usage line: what the board shows, in the dashboard (built 2026-09-26)
+
+`~/assistant/live-stats` already shows the DeepSeek account in a detail row at
+the bottom of the panel — `$4.40 left · spent $5.51 of $9.91` — fed by
+`bin/deepseek-usage`, which hits `api.deepseek.com/user/balance` with the key
+from `~/.pi/agent/auth.json`. Only the balance is reachable: the token-usage
+charts on platform.deepseek.com sit behind a browser session cookie and 404 for
+an API key (checked 2026-09-21 in that repo's helper).
+
+The dashboard now carries the same information, but built so a **provider change
+does not break it**, which is the part live-stats' version cannot do:
+
+- **Cost comes from the transcript, so it is provider-agnostic.** pi writes a
+  `usage` block with `cost.total` and the `model` on every assistant message —
+  verified across the live session (322 priced turns, $0.8416). `/usage` sums
+  those, split into today and the session, plus input/output/cache tokens. No
+  API key, no per-provider code; a session that spanned a model switch sums
+  correctly because each message names its own model.
+- **The balance is per provider and optional.** `AGENT_USAGE_CMD` (or an
+  installed `agent-usage-<provider>` / `<provider>-usage`) is run on a slow
+  clock and its JSON is passed through. No helper means no balance — the line
+  says *balance unavailable* rather than inventing a figure, and the local cost
+  stays. A helper that fails, or is missing, is reported and survived.
+- The balance is dropped the moment the provider changes: another provider's
+  balance is not a stale number, it is the wrong one.
+
+Here `AGENT_USAGE_CMD` points at `live-stats/bin/deepseek-usage`, because that
+repo already owns the helper *and* the `deepseek.topup_total` anchor it needs
+(the API only reports what is left, so spend needs a baseline someone sets once
+per top-up). Duplicating the script would mean configuring that anchor twice.
+
+In the page it is one dim line above the composer, tapping gives the full
+detail. `tests/usage.test.sh` (21 checks) covers the totals, the helper
+contract, a helper that errors, one that is missing entirely, and the
+provider switch.

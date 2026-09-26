@@ -20,6 +20,7 @@ run bash opensession.test.sh
 run bash delete.test.sh
 run bash version.test.sh
 run bash service.test.sh
+run bash usage.test.sh
 run bash errors.test.sh
 run bash resume.test.sh
 

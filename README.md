@@ -193,6 +193,47 @@ systemd retried six seconds later. So:
 `tests/service.test.sh` runs the daemon with a PATH stripped of every place pi
 could live, including one case with nothing installed at all.
 
+## Usage line
+
+The dashboard shows one dim line above the composer: what the current model has
+cost, and — where the provider can be asked — what is left on the account.
+
+```
+deepseek-flash · $4.40 left · today $0.51
+```
+
+Tap it for the full picture: balance and top-up, today's turns and tokens
+(input/output/cached), the session total, and which helper supplied the balance.
+
+Two sources, deliberately kept apart:
+
+**Cost, from the transcript — works for every provider.** pi writes a `usage`
+block with a cost on every assistant message, so the daemon sums those from the
+live transcript (`GET /usage`). No API key, no per-provider code, and it keeps
+working the moment you switch model or provider. Each message also names its own
+model, so a session that spanned a switch is summed correctly.
+
+**Balance, from a helper — provider-specific and optional.** If
+`AGENT_USAGE_CMD` is set, or an `agent-usage-<provider>` / `<provider>-usage`
+executable is installed, the daemon runs it on a slow clock
+(`AGENT_USAGE_INTERVAL`) and shows what it returns. The contract is JSON:
+
+```json
+{"currency": "USD", "total": "4.40", "topped_up": "4.40",
+ "spent": 5.51, "topup_total": 9.91}
+```
+
+`total` may be a decimal string (as DeepSeek returns it) or a number of minor
+units with an `exponent`. `error` instead of those keys is fine — the line says
+*balance unavailable* and keeps the cost. **Nothing is invented**: a provider
+with no helper simply has no balance, because only the provider knows one.
+
+DeepSeek is the worked example on this box: `api.deepseek.com/user/balance` is
+all an API key can reach — the token-usage charts need a browser session — so
+the line shows credit left plus spend since the top-up, anchored on
+`topup_total` (see `live-stats/bin/deepseek-usage`, which owns both the helper
+and that anchor).
+
 ## Tests
 
 No dependencies, no network, and **nothing touches the live agent** — every
@@ -211,6 +252,7 @@ node tests/ui.test.js          # one suite
 | `opensession.test.sh` | resume against the daemon: T1–T8, T13 |
 | `delete.test.sh` | delete against the daemon: D1–D6, D8 |
 | `version.test.sh` | `GET /version`, and that `/state` stays a pure pass-through |
+| `usage.test.sh` | `GET /usage`: transcript totals, balance helpers, and their failure modes |
 | `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
 | `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
 
@@ -226,6 +268,9 @@ nothing personal is baked in.
 | `AGENT_PROVIDER` / `AGENT_MODEL` | `deepseek` / `deepseek-v4-pro` | pi provider and model |
 | `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
 | `AGENT_TRASH_DAYS` | `30` | days a deleted transcript stays in `trash/` before the janitor purges it |
+| `AGENT_USAGE_CMD` | unset | command that prints the current provider's account balance as JSON (see *Usage* below) |
+| `AGENT_USAGE_REFRESH` | `30` | seconds between transcript re-reads for the usage line |
+| `AGENT_USAGE_INTERVAL` | `900` | seconds between balance API calls |
 
 The dashboard also shows a **build badge** (top right): its own `UI_VERSION`
 and, from `GET /version`, the running daemon's `DAEMON_VERSION` and the commit

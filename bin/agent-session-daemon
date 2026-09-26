@@ -105,11 +105,18 @@ DISPATCH_TIMEOUT = int(os.environ.get("AGENT_DISPATCH_TIMEOUT", "30"))
 JANITOR_INTERVAL = int(os.environ.get("AGENT_JANITOR_INTERVAL", "15"))
 TRASH_DAYS = int(os.environ.get("AGENT_TRASH_DAYS", "30"))
 
+# §20 usage: transcript totals refresh often (they are read from a local file);
+# an account balance is a slow, rate-limited API call and is only re-read when
+# it goes stale or the provider changes.
+USAGE_REFRESH = int(os.environ.get("AGENT_USAGE_REFRESH", "30"))
+USAGE_INTERVAL = int(os.environ.get("AGENT_USAGE_INTERVAL", "900"))
+USAGE_CMD = os.environ.get("AGENT_USAGE_CMD", "")
+
 # What this build is. Bump DAEMON_VERSION with every daemon change: the
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-26.1"
+DAEMON_VERSION = "2026-09-26.2"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -176,6 +183,88 @@ def session_meta(path, which):
     if not info["title"]:
         info["title"] = info["sessionName"] or info["name"]
     return info
+
+
+def _usage_of(msg):
+    """The usage block pi wrote on an assistant message, or None.
+
+    pi records this for every provider (it is how the TUI shows cost), so a
+    transcript is a provider-agnostic source of what has actually been spent —
+    no API key, no per-provider code. A provider that reports nothing simply
+    yields no totals.
+    """
+    u = msg.get("usage")
+    if not isinstance(u, dict):
+        return None
+    cost = u.get("cost") if isinstance(u.get("cost"), dict) else {}
+    total = cost.get("total")
+    return {
+        "input": u.get("input") or 0,
+        "output": u.get("output") or 0,
+        "cache_read": u.get("cacheRead") or 0,
+        "cache_write": u.get("cacheWrite") or 0,
+        "cost": float(total) if isinstance(total, (int, float)) else None,
+    }
+
+
+def _ts_seconds(ts):
+    """pi timestamps are epoch ms; older files may carry seconds."""
+    if not isinstance(ts, (int, float)) or ts <= 0:
+        return None
+    return ts / 1000.0 if ts > 1e11 else float(ts)
+
+
+def transcript_usage(path, day_start=None):
+    """Token and cost totals from one transcript (see _usage_of).
+
+    `day_start` splits out today's share, which is the number that answers
+    "what has this cost me lately" — the session total only ever grows.
+    """
+    tot = {"messages": 0, "input": 0, "output": 0, "cache_read": 0,
+           "cache_write": 0, "cost": 0.0, "unpriced": 0}
+    day = {"messages": 0, "input": 0, "output": 0, "cost": 0.0}
+    models = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if e.get("type") != "message":
+                    continue
+                m = e.get("message") or {}
+                if m.get("role") != "assistant":
+                    continue
+                u = _usage_of(m)
+                if not u:
+                    continue
+                tot["messages"] += 1
+                tot["input"] += u["input"]
+                tot["output"] += u["output"]
+                tot["cache_read"] += u["cache_read"]
+                tot["cache_write"] += u["cache_write"]
+                if u["cost"] is None:
+                    tot["unpriced"] += 1
+                else:
+                    tot["cost"] += u["cost"]
+                if m.get("model"):
+                    models[m["model"]] = models.get(m["model"], 0) + 1
+                ts = _ts_seconds(m.get("timestamp"))
+                if day_start and ts and ts >= day_start:
+                    day["messages"] += 1
+                    day["input"] += u["input"]
+                    day["output"] += u["output"]
+                    day["cost"] += u["cost"] or 0.0
+    except OSError:
+        return None
+    tot["cost"] = round(tot["cost"], 4)
+    day["cost"] = round(day["cost"], 4)
+    tot["models"] = models
+    return {"session": tot, "today": day}
 
 
 def session_messages(path, cap=4000):
@@ -373,6 +462,7 @@ class Daemon:
         self.last_web_message = None    # last web prompt (for steer-turned-run case)
         self.last_web_asked = None
         self.model_input = None         # current model's input types (None = unknown)
+        self.usage = None               # §20 usage/balance snapshot for /usage
         self.current_out_dir = None     # §15: this turn's out dir, scanned at settle
         self.req_seq = 0
         self.stdin_lock = threading.Lock()          # serialize writes to pi stdin
@@ -1358,6 +1448,87 @@ class Daemon:
             except Exception as e:
                 log("trash purge error:", e)
 
+    # ---- usage (transcript totals + an optional account balance) ------
+    def _day_start(self):
+        """Local midnight, as epoch seconds — the boundary for "today"."""
+        lt = time.localtime()
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            0, 0, 0, 0, 0, -1))
+
+    def usage_cmd(self, provider):
+        """The command that reports `provider`'s account balance, if any.
+
+        Provider-agnostic by configuration: AGENT_USAGE_CMD wins, else an
+        installed `agent-usage-<provider>` or `<provider>-usage`. No command
+        means no balance — the transcript totals stand on their own and nothing
+        is invented for a provider that cannot be asked.
+        """
+        if USAGE_CMD:
+            return USAGE_CMD.split()
+        for name in (f"agent-usage-{provider}", f"{provider}-usage"):
+            hit = find_bin(name)
+            if os.path.isfile(hit) and os.access(hit, os.X_OK):
+                return [hit]
+        return None
+
+    def read_balance(self, provider):
+        """Run the provider's balance helper. Returns None when there is none,
+        else a dict with ok=False and a reason rather than a wrong number."""
+        cmd = self.usage_cmd(provider)
+        if not cmd:
+            return None
+        out = {"cmd": " ".join(cmd), "provider": provider,
+               "fetched": time.time()}
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+            raw = json.loads(r.stdout)
+        except Exception as e:
+            return {**out, "ok": False, "err": str(e)[:80]}
+        if not isinstance(raw, dict) or "error" in raw:
+            err = raw.get("error") if isinstance(raw, dict) else "unexpected output"
+            return {**out, "ok": False, "err": str(err)[:80]}
+        return {**raw, **out, "ok": True}
+
+    def usage_loop(self):
+        """Keep the /usage snapshot current.
+
+        The transcript totals are local and cheap; the balance is a network call
+        to one provider, so it is re-read on USAGE_INTERVAL — and immediately
+        when the provider changes, because another provider's balance is not a
+        stale number, it is the wrong one.
+        """
+        balance, balance_provider, next_balance = None, None, 0.0
+        while True:
+            provider, model_id, path = "", "", None
+            try:
+                st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+                d = st.get("data") or {}
+                model_id = (d.get("model") or {}).get("id") or ""
+                provider = (d.get("model") or {}).get("provider") or ""
+                path = d.get("sessionFile")
+            except TimeoutError:
+                pass
+            if provider != balance_provider:
+                balance, balance_provider, next_balance = None, provider, 0.0
+            if time.time() >= next_balance:
+                next_balance = time.time() + USAGE_INTERVAL
+                got = self.read_balance(provider)
+                if got is not None:
+                    balance = got
+                else:
+                    balance = None      # nothing to ask for this provider
+            snap = {"provider": provider, "model": model_id, "file": path,
+                    "fetched": time.time()}
+            if balance:
+                snap["balance"] = balance
+            if path and os.path.isfile(path):
+                totals = transcript_usage(path, day_start=self._day_start())
+                if totals:
+                    snap.update(totals)
+            with self.lock:
+                self.usage = snap
+            time.sleep(USAGE_REFRESH)
+
     def purge_trash(self):
         """Remove trashed transcripts older than TRASH_DAYS. Before that,
         recovery is an ordinary `mv`; after it, the nightly restic snapshot is
@@ -1383,6 +1554,7 @@ class Daemon:
         self.start_pi()
         threading.Thread(target=self.read_fifo, daemon=True).start()
         threading.Thread(target=self.janitor, daemon=True).start()
+        threading.Thread(target=self.usage_loop, daemon=True).start()
         self.start_web()
         threading.Thread(target=self._track_active_session, daemon=True).start()
         self.read_events()   # blocks until pi dies
@@ -1571,6 +1743,10 @@ class Handler(BaseHTTPRequestHandler):
             self._command({"type": "get_state"})
         elif path == "/version":
             self._json(build_info())
+        elif path == "/usage":
+            with self.d.lock:
+                snap = self.d.usage
+            self._json(snap or {"error": "no usage snapshot yet"})
         elif path == "/messages":
             self._messages()
         elif path == "/sessions":
