@@ -236,7 +236,8 @@ and that anchor).
 
 ## Approval gate
 
-A pi extension (`~/.pi/agent/extensions/approval-gate/`) asks before anything
+A pi extension asks before anything: source in `~/assistant/pi-extensions/approval-gate/`,
+symlinked into `~/.pi/agent/extensions/` so pi discovers it
 changes. Read-only commands run without a prompt:
 
 | | |

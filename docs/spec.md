@@ -1487,4 +1487,6 @@ timeout.
 
 Note: the extension lives in `~/.pi/agent/extensions/approval-gate/`, which is
 **not under version control** — which is how a change this consequential sat
-broken unnoticed. Moving it into a repo is an open follow-up.
+broken unnoticed. Moved 2026-09-26 to `~/assistant/pi-extensions/approval-gate/`
+(its own git repo) with a symlink back into `~/.pi`, verified still discovered
+by real pi (`gate` registered, no `extension_error`).
