@@ -12,6 +12,9 @@ const vm = require('vm');
 
 const HTML = path.join(__dirname, '..', 'web', 'index.html');
 const js = /<script>([\s\S]*)<\/script>/.exec(fs.readFileSync(HTML, 'utf8'))[1];
+// The page's own build number, so the badge cases below compare against
+// whatever it currently is rather than a string that ages out.
+const UI_VERSION = /const UI_VERSION = '([^']+)'/.exec(js)[1];
 
 let fails = 0;
 const ok = (cond, label) => {
@@ -320,12 +323,12 @@ console.log('=== snapshot reload: errored assistant message is visible');
   console.log('=== build badge: what is actually running');
   const J = newTab();
   Object.assign(J.routes, BASE_ROUTES(stateD));
-  J.routes['/version'] = {json: {daemon: '2026-09-25.4', commit: '599cee9',
+  J.routes['/version'] = {json: {daemon: UI_VERSION, commit: '599cee9',
                                  built: '2026-09-26T13:37:00+03:00'}};
   await tick();
-  ok(J.byId['buildBadge'].textContent.includes('2026-09-25.4'), 'badge shows the dashboard version');
+  ok(J.byId['buildBadge'].textContent.includes(UI_VERSION), 'badge shows the dashboard version');
   ok(J.byId['buildBadge'].textContent.includes('599cee9'), 'and the commit');
-  ok(/daemon 2026-09-25\.4/.test(J.byId['buildBadge'].title), 'the title names the daemon');
+  ok(/daemon /.test(J.byId['buildBadge'].title), 'the title names the daemon');
   ok(/installed 2026-09-26/.test(J.byId['buildBadge'].title), 'and when it was installed');
   ok(!/differ/.test(J.byId['buildBadge'].title), 'matching versions are not flagged');
 
@@ -342,7 +345,7 @@ console.log('=== snapshot reload: errored assistant message is visible');
   Object.assign(M.routes, BASE_ROUTES(stateD));
   M.routes['/version'] = {status: 404, json: {error: 'not found'}};
   await tick();
-  ok(M.byId['buildBadge'].textContent.includes('2026-09-25.4'), 'still shows the page version');
+  ok(M.byId['buildBadge'].textContent.includes(UI_VERSION), 'still shows the page version');
   ok(!M.byId['buildBadge'].textContent.includes('not found'), 'and does not render the 404 body');
   ok(/unknown/.test(M.byId['buildBadge'].title), 'and says the daemon version is unknown');
 

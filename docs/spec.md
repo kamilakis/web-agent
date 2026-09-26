@@ -1335,6 +1335,12 @@ ahead of the running daemon (a Resume/Delete button against a build with no
 in `$STATE/build.json`, and an older daemon with no `/version` at all reads as
 *version unknown* rather than as a match.
 
+**The bump rule: both numbers move together.** They identify one *deploy*, not
+one file — `install.sh` installs the page and the daemon in the same breath, so
+a daemon-only change bumps `UI_VERSION` too and the badge stays silent. Warn
+only when the halves actually disagree, which means someone shipped one without
+the other.
+
 `GET /version` is a new endpoint rather than a field merged into `/state`,
 deliberately: `/state` is a verbatim pass-through of pi's `get_state` and tests
 assert on its shape, so the build info goes beside it, not inside it.
@@ -1342,3 +1348,45 @@ assert on its shape, so the build info goes beside it, not inside it.
 Tests: `tests/version.test.sh` (9 checks, including a missing `build.json` and
 that `/state` gained nothing) and three cases in `tests/ui.test.js` for the
 badge itself — matching, mismatched, and absent.
+## 19. Always-on: the boot crash and the PATH trap (fixed 2026-09-26)
+
+
+The service was already enabled and lingering, so "make it a service" needed no
+work. Auditing it against `journalctl --user -u agent-session -b` turned up one
+real outage:
+
+```
+Sep 21 11:07:26 debnuc agent-session-daemon[863]: FileNotFoundError:
+    [Errno 2] No such file or directory: 'pi'
+Sep 21 11:07:26 debnuc systemd[815]: agent-session.service: Main process
+    exited, code=exited, status=1/FAILURE
+Sep 21 11:07:32 debnuc systemd[815]: Scheduled restart job, restart counter is at 1.
+Sep 21 11:07:33 debnuc agent-session-daemon[1490]: starting pi: … listening on FIFO
+```
+
+At boot the daemon could not find `pi` and died; six seconds later a graphical
+login imported the real environment into the user manager, systemd retried, and
+it came up. The agent was offline for those seconds and — with
+`Restart=on-failure` and a start limit — could have stayed down.
+
+Why: `pi` is `~/.local/bin/pi`. A `systemctl --user` unit started at boot with
+linger gets systemd's **default PATH**, which has no `~/.local/bin`; the
+manager only learns the login environment once a session imports it. Nothing in
+the unit said so, and the daemon spawned a bare `"pi"`.
+
+Fixes:
+
+- `find_bin()` in the daemon resolves `pi` and `matrix-notify` by looking next
+  to its own binary first (they are installed side by side in `~/.local/bin`),
+  then `PATH`, then the usual bin dirs, with `AGENT_PI_BIN` as an override.
+- `start_pi()` retries the spawn for ~8s before giving up, so a slow mount or an
+  upgrade running under us no longer takes the service down at boot.
+- The unit pins `Environment=PATH=%h/.local/bin:…` and switches to
+  `Restart=always` with `StartLimitIntervalSec=0`, so it retries rather than
+  giving up.
+- `tests/service.test.sh` runs the daemon under `PATH=/usr/bin:/bin` in four
+  layouts: side by side, `$HOME/.local/bin` only, `AGENT_PI_BIN` only, and
+  nothing at all (where it must retry, then fail loudly).
+
+Readiness is `/state`, not the unit's active state: it round-trips `get_state`
+to pi, so a 504 means "up but not ready for chat".

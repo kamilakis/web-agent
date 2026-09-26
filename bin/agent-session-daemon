@@ -23,6 +23,7 @@ import sys
 import json
 import time
 import queue
+import shutil
 import base64
 import signal
 import threading
@@ -108,7 +109,7 @@ TRASH_DAYS = int(os.environ.get("AGENT_TRASH_DAYS", "30"))
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-25.4"
+DAEMON_VERSION = "2026-09-26.1"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -296,6 +297,36 @@ def build_info():
     return info
 
 
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def find_bin(name, env_var=None):
+    """Locate a helper binary without trusting the ambient PATH.
+
+    The daemon and its helpers (pi, matrix-notify, agent-task) are installed
+    side by side in ~/.local/bin — but a `systemctl --user` unit started at boot
+    with linger enabled, before any login has imported the environment, gets
+    systemd's default PATH, which does NOT include ~/.local/bin. A bare "pi"
+    therefore raised FileNotFoundError at 2026-09-21 11:07:26, and the service
+    only came up because systemd retried six seconds later, once a graphical
+    login had imported the real environment. Look next to ourselves first.
+    """
+    override = os.environ.get(env_var) if env_var else None
+    if override:
+        return override
+    here = os.path.join(BIN_DIR, name)
+    if os.path.isfile(here) and os.access(here, os.X_OK):
+        return here
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in (os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/usr/bin"):
+        cand = os.path.join(d, name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return name          # let Popen report it in its own words
+
+
 def log(*a):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] " + " ".join(str(x) for x in a)
     with open(LOG, "a") as f:
@@ -312,7 +343,7 @@ def post_matrix(text):
         return
     try:
         subprocess.run(
-            ["matrix-notify"],
+            [find_bin("matrix-notify")],
             input=text.encode()[:30000],
             check=True,
             timeout=20,
@@ -397,8 +428,9 @@ class Daemon:
 
     def start_pi(self):
         resume = self.resume_target()
+        pi_bin = find_bin("pi", "AGENT_PI_BIN")
         cmd = [
-            "pi", "--mode", "rpc",
+            pi_bin, "--mode", "rpc",
             "--provider", PROVIDER,
             "--model", MODEL,
             "--session-dir", SESSIONS_DIR,
@@ -413,15 +445,26 @@ class Daemon:
         else:
             cmd += ["--session-id", SESSION_ID, "-n", SESSION_NAME]
         log("starting pi:", " ".join(cmd), "cwd=", WORKDIR)
-        self.proc = subprocess.Popen(
-            cmd,
-            cwd=WORKDIR,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=1,
-            text=True,
-        )
+        # A mount that is not up yet (or a package being upgraded under us) used
+        # to take the whole service down at boot. Retry briefly before giving
+        # up: main() exits 1, so systemd will restart us either way.
+        for attempt in range(1, 6):
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    cwd=WORKDIR,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=1,
+                    text=True,
+                )
+                break
+            except FileNotFoundError as e:
+                if attempt >= 5:
+                    raise
+                log(f"pi not runnable yet ({e}); retrying in 2s")
+                time.sleep(2)
         threading.Thread(target=self._drain_stderr, daemon=True).start()
 
     def _track_active_session(self):

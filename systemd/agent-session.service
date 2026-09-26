@@ -2,14 +2,27 @@
 Description=Always-on pi agent session (Siri commands -> Matrix)
 After=network-online.target
 Wants=network-online.target
+# Never give up. An always-on chat service should keep retrying rather than sit
+# dead after a burst of failures — the daemon exits 1 when pi dies precisely so
+# systemd brings it back.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/agent-session-daemon
-Restart=on-failure
+# ~/.local/bin holds pi and matrix-notify. A `systemctl --user` unit started at
+# boot (linger, before a login has imported the environment) gets systemd's
+# default PATH, which does NOT include it: on 2026-09-21 11:07:26 the daemon
+# died with `FileNotFoundError: 'pi'` and only came up because systemd retried
+# afterwards. The daemon also resolves helpers next to itself, but pinning PATH
+# here keeps every other tool (ffmpeg, and anything pi shells out to) working.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
 RestartSec=5
-# Personal values go in Environment= lines, e.g.:
-#   Environment=AGENT_WEB_HOST=192.0.2.10        # bind the dashboard to your VPN IP
+# Personal values go in a drop-in — agent-session.service.d/*.conf — NOT here:
+# install.sh copies systemd/*.service over the installed unit, so anything set
+# in this file is lost the next time the repo is installed. See:
+#   Environment=AGENT_WEB_HOST=192.0.2.10        # bind the dashboard to a VPN IP
 #   Environment=AGENT_VISION_MODEL=deepseek/deepseek-v4-flash-vision-exp
 Environment=PI_SESSION_FILE=
 Environment=PI_SESSION_ID=
@@ -17,7 +30,8 @@ Environment=PI_CODING_AGENT=
 Environment=PI_MODEL=
 Environment=PI_PROVIDER=
 Environment=PI_REASONING_LEVEL=
-# Default agent model (vision-capable, so the daemon never auto-switches on photos)
+# Generic shipped default. A drop-in overrides it (see model.conf). It is
+# deliberately vision-capable so the daemon never auto-switches on photos.
 Environment=AGENT_PROVIDER=huggingface
 Environment=AGENT_MODEL=zai-org/GLM-5.3-Flash
 

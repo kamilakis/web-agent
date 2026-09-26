@@ -153,6 +153,46 @@ cd web-agent
    network. `AGENT_WEB_HOST` (default `127.0.0.1`) controls the bind address —
    set it to your VPN IP to reach the dashboard remotely.
 
+## Always on
+
+`agent-session` is a **systemd user** service: enabled, and `Linger=yes` so it
+runs at boot and keeps running with nobody logged in.
+
+```sh
+git clone … && cd web-agent && ./install.sh      # installs, enables, writes build.json
+
+systemctl --user status agent-session            # is it up?
+curl -s http://<host>:8383/version               # which build is running?
+curl -s http://<host>:8383/state                 # is the chat path answering?
+```
+
+`/state` is the readiness check that matters: it round-trips `get_state` to pi,
+so a 200 means the agent can actually answer. A 504 means the daemon is up but
+pi is not — restart the service.
+
+```sh
+systemctl --user restart agent-session           # interrupts a run in flight
+journalctl --user -u agent-session -b            # the systemd view
+tail -f ~/.local/share/agent-session/daemon.log  # the daemon's own log
+```
+A restart is cheap: the daemon resumes the **active** transcript (see
+`AGENT_SESSION_DIR/active-session`), so the conversation continues.
+
+Two settings exist because of one incident — at boot on 2026-09-21 11:07:26 the
+daemon died with `FileNotFoundError: 'pi'`. `pi` lives in `~/.local/bin`, and a
+user unit started before any login has imported the environment gets systemd's
+default PATH, which does not include it; the service only came up because
+systemd retried six seconds later. So:
+
+- the unit pins `Environment=PATH=%h/.local/bin:…`, and the daemon also looks
+  for its helpers next to its own binary (`find_bin()`), with `AGENT_PI_BIN` as
+  an override;
+- `Restart=always` with `StartLimitIntervalSec=0` — an always-on chat service
+  keeps retrying rather than sitting dead after a burst of failures.
+
+`tests/service.test.sh` runs the daemon with a PATH stripped of every place pi
+could live, including one case with nothing installed at all.
+
 ## Tests
 
 No dependencies, no network, and **nothing touches the live agent** — every
@@ -189,9 +229,9 @@ nothing personal is baked in.
 
 The dashboard also shows a **build badge** (top right): its own `UI_VERSION`
 and, from `GET /version`, the running daemon's `DAEMON_VERSION` and the commit
-`install.sh` recorded. The two versions are bumped together, so a mismatch —
-typically a new page against a daemon that has not been restarted — is visible
-rather than guessed at. Tap it for the full string.
+`install.sh` recorded. The two numbers move **together** — they identify one
+deploy, not one file — so a mismatch really does mean the page and the daemon
+came from different installs. Tap the badge for the full string.
 | `AGENT_SESSION_ID` | `siri-agent` | session id = memory key; change to wipe |
 | `AGENT_SESSION_NAME` | `siri-agent` | display name for new sessions (the web UI can name them per-session) |
 | `AGENT_TASK_WAIT` | `15` | seconds Siri holds the SSH call open |
