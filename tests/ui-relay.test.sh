@@ -39,6 +39,7 @@ sleep 1.5
 ok "$(grep -c '"type": "ui_request"' "$ST/sse")" "1" "the question was broadcast"
 has "$(cat "$ST/sse")" 'Run shell command' "with its title"
 has "$(cat "$ST/sse")" 'Allow for this session' "and its options"
+has "$(cat "$ST/sse")" 'deadline' "and how long it has"
 ID=$(python3 -c "
 import json
 for line in open('$ST/sse'):

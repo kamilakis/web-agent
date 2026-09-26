@@ -260,13 +260,15 @@ allow-list.
 it reaches you wherever you are — phones included — instead of waiting on a
 tty. A question asked while the page was closed is picked up on reload
 (`GET /ui`). Nothing hangs forever: an unanswered question is cancelled after
-`AGENT_UI_TIMEOUT` (default 180s), or after `AGENT_UI_NOUI_GRACE` (15s) when no
+`AGENT_UI_TIMEOUT` (default 90s), or after `AGENT_UI_NOUI_GRACE` (15s) when no
 dashboard is connected at all — which is what lets Siri and Matrix turns fail
-closed rather than sit there.
+closed rather than sit there. The dialog counts that down, and a question that
+runs out of time is reported to the agent as *nobody answered*, not as a
+denial, so it never narrates a decision you did not make.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `AGENT_UI_TIMEOUT` | `180` | seconds an extension question waits for an answer |
+| `AGENT_UI_TIMEOUT` | `90` | seconds an extension question waits for an answer |
 | `AGENT_UI_NOUI_GRACE` | `15` | seconds to wait for a dashboard to appear before cancelling |
 
 `tests/ui-relay.test.sh` covers the round trip (select, confirm, input, cancel,

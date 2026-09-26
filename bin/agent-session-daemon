@@ -117,14 +117,14 @@ USAGE_CMD = os.environ.get("AGENT_USAGE_CMD", "")
 # up. The old code cancelled every dialog instantly ("v1 auto-cancels") because
 # nothing could answer it; now the dashboard can, but a run must still never
 # hang forever on a phone that is not looking.
-UI_TIMEOUT = int(os.environ.get("AGENT_UI_TIMEOUT", "180"))
+UI_TIMEOUT = int(os.environ.get("AGENT_UI_TIMEOUT", "90"))
 UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 
 # What this build is. Bump DAEMON_VERSION with every daemon change: the
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-26.3"
+DAEMON_VERSION = "2026-09-26.4"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -1551,7 +1551,8 @@ class Daemon:
             return
         rid = ev.get("id")
         req = {"type": "ui_request", "id": rid, "method": method,
-               "title": ev.get("title") or "", "asked": time.time()}
+               "title": ev.get("title") or "", "asked": time.time(),
+               "deadline": time.time() + UI_TIMEOUT}
         for key in ("message", "options", "placeholder", "prefill"):
             if ev.get(key) is not None:
                 req[key] = ev[key]

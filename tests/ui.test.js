@@ -469,6 +469,22 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(AB.byId['uiDialog'].hidden === false, 'a reload picks up the pending question');
   ok(AB.byId['uiTitle'].textContent.includes('Still waiting'), 'and shows it');
 
+  console.log('=== Part 21: the question says how long it has');
+  const AC = newTab();
+  Object.assign(AC.routes, BASE_ROUTES(stateD));
+  await tick();
+  AC.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q4', method: 'select',
+    title: '⚠️  Pick', options: ['a', 'b'],
+    deadline: Date.now() / 1000 + 42})});
+  await tick();
+  ok(AC.byId['uiExpires'].hidden === false, 'the countdown is shown when the daemon sets a deadline');
+  ok(/expires in 4[12]s/.test(AC.byId['uiExpires'].textContent),
+     'and counts from the deadline (got ' + AC.byId['uiExpires'].textContent + ')');
+  AC.ctx.onEvent({data: JSON.stringify({type: 'ui_resolved', id: 'q4', cancelled: true,
+    why: 'nobody answered in time', method: 'select'})});
+  await tick();
+  ok(AC.byId['uiDialog'].hidden === true, 'closing stops it');
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');

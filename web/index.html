@@ -152,6 +152,9 @@ body {
 }
 #uiDialog .uiTitle { white-space:pre-wrap; font-weight:600; margin-bottom:10px; }
 #uiDialog .uiOpts { display:flex; flex-direction:column; gap:6px; }
+#uiDialog .uiExpires {
+  margin-top:10px; color:var(--dim); font:500 10.5px/1 var(--mono); opacity:.8;
+}
 #uiDialog .uiOpt {
   text-align:left; cursor:pointer; padding:9px 12px;
   background:var(--surface); color:var(--text);
@@ -509,6 +512,7 @@ footer {
   <div class="uiTitle" id="uiTitle"></div>
   <div class="uiOpts" id="uiOpts"></div>
   <input class="uiText" id="uiText" type="text" hidden>
+  <div class="uiExpires" id="uiExpires" hidden></div>
   <div class="uiRow">
     <button id="uiCancel" type="button">Cancel</button>
     <button id="uiSend" type="button" hidden>Send</button>
@@ -519,7 +523,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-26.3';
+const UI_VERSION = '2026-09-26.4';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -651,6 +655,7 @@ const uiOpts = document.getElementById('uiOpts');
 const uiText = document.getElementById('uiText');
 const uiSend = document.getElementById('uiSend');
 const uiCancel = document.getElementById('uiCancel');
+const uiExpires = document.getElementById('uiExpires');
 const foot = document.getElementById('foot');
 let viewing = null;   // {file, dir, title} while a past session is open read-only
 let sessions;         // undefined = endpoint missing (pre-restart daemon), null = fetch failed
@@ -904,14 +909,33 @@ function showUiDialog(req) {
       uiOpts.appendChild(b);
     }
   }
+  startUiCountdown(req);
   uiDialog.hidden = false;
   uiScrim.hidden = false;
   if (isText) { try { uiText.focus(); } catch {} }
 }
 function hideUiDialog() {
   uiReq = null;
+  clearInterval(uiTick);
+  uiTick = null;
   uiDialog.hidden = true;
   uiScrim.hidden = true;
+}
+// The daemon cancels an unanswered question (AGENT_UI_TIMEOUT, 90s by default),
+// so say how long is left rather than letting it vanish mid-tap.
+let uiTick = null;
+function startUiCountdown(req) {
+  clearInterval(uiTick);
+  uiTick = null;
+  const left = () => Math.max(0, Math.round((req.deadline || 0) - Date.now() / 1000));
+  if (!req.deadline) { uiExpires.hidden = true; return; }
+  uiExpires.hidden = false;
+  const paint = () => {
+    const n = left();
+    uiExpires.textContent = n > 0 ? 'expires in ' + n + 's' : 'expired';
+  };
+  paint();
+  uiTick = setInterval(paint, 1000);
 }
 async function answerUi(option) {
   const req = uiReq;

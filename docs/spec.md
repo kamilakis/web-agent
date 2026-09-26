@@ -1490,3 +1490,19 @@ Note: the extension lives in `~/.pi/agent/extensions/approval-gate/`, which is
 broken unnoticed. Moved 2026-09-26 to `~/assistant/pi-extensions/approval-gate/`
 (its own git repo) with a symlink back into `~/.pi`, verified still discovered
 by real pi (`gate` registered, no `extension_error`).
+
+### 21.1 A timeout is not a denial (2026-09-26)
+
+The relay worked, but the first live question exposed a lie in the reporting.
+Two gated commands were each cancelled — `cancelled (nobody answered in time)`
+in the daemon log, 180s apart — and the tool result the agent received said
+`Denied by user (approval gate)`. The agent then described a decision the user
+had never made. The gate had one wording for three different outcomes.
+
+pi only tells an extension "cancelled", so the extension cannot distinguish a
+dismissal from a deadline; it now says exactly that: *nobody answered, so the
+call was blocked and NOTHING was run; the question was dismissed or timed out.*
+
+The default `AGENT_UI_TIMEOUT` drops 180s → 90s, and the question now carries
+its `deadline`, which the dashboard renders as a live countdown — a dialog that
+vanishes mid-tap is worse than one that says how long is left.
