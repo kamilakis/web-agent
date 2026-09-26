@@ -317,6 +317,35 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(I.byId['banner'].hidden === false, 'stays in view mode');
   ok(/daemon restart/.test(I.byId['sbNote'].textContent), 'and says a restart is needed');
 
+  console.log('=== build badge: what is actually running');
+  const J = newTab();
+  Object.assign(J.routes, BASE_ROUTES(stateD));
+  J.routes['/version'] = {json: {daemon: '2026-09-25.4', commit: '599cee9',
+                                 built: '2026-09-26T13:37:00+03:00'}};
+  await tick();
+  ok(J.byId['buildBadge'].textContent.includes('2026-09-25.4'), 'badge shows the dashboard version');
+  ok(J.byId['buildBadge'].textContent.includes('599cee9'), 'and the commit');
+  ok(/daemon 2026-09-25\.4/.test(J.byId['buildBadge'].title), 'the title names the daemon');
+  ok(/installed 2026-09-26/.test(J.byId['buildBadge'].title), 'and when it was installed');
+  ok(!/differ/.test(J.byId['buildBadge'].title), 'matching versions are not flagged');
+
+  console.log('=== build badge: a page ahead of its daemon says so');
+  const K = newTab();
+  Object.assign(K.routes, BASE_ROUTES(stateD));
+  K.routes['/version'] = {json: {daemon: '2026-09-25.1', commit: 'aaaaaaa'}};
+  await tick();
+  ok(/differ/.test(K.byId['buildBadge'].title), 'the mismatch is called out');
+  ok(K.byId['buildBadge'].textContent.includes('aaaaaaa'), 'and the running commit is shown');
+
+  console.log('=== build badge: an old daemon without /version');
+  const M = newTab();
+  Object.assign(M.routes, BASE_ROUTES(stateD));
+  M.routes['/version'] = {status: 404, json: {error: 'not found'}};
+  await tick();
+  ok(M.byId['buildBadge'].textContent.includes('2026-09-25.4'), 'still shows the page version');
+  ok(!M.byId['buildBadge'].textContent.includes('not found'), 'and does not render the 404 body');
+  ok(/unknown/.test(M.byId['buildBadge'].title), 'and says the daemon version is unknown');
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');

@@ -1318,3 +1318,27 @@ Tests: `tests/delete.test.sh` (D1–D6, D8, 24 checks) and the Part C sections o
 two-tab case). `AGENT_JANITOR_INTERVAL=1` keeps D6 to a couple of seconds.
 Out of scope per the spec: bulk delete, an undelete UI, and auto-cleanup of
 header-only empty sessions.
+
+### 18.5 Build badge and versioning (built 2026-09-26)
+
+Both halves of the dashboard now carry a version, and the page shows the pair at
+the top right: `v2026-09-25.4 · 599cee9` (the commit is desktop-only — on a
+phone the header already holds the toggle, the name, the status and the model).
+Tapping it prints the whole string: dashboard version, daemon version and
+commit, install time, and — when they differ — `⚠ dashboard and daemon differ —
+restart the daemon`.
+
+That last line is the point. Three times in this session the deployed page was
+ahead of the running daemon (a Resume/Delete button against a build with no
+`/deletesession` yet), and the only signal was a request that 404'd.
+`DAEMON_VERSION` is bumped with `UI_VERSION`, `install.sh` records the git commit
+in `$STATE/build.json`, and an older daemon with no `/version` at all reads as
+*version unknown* rather than as a match.
+
+`GET /version` is a new endpoint rather than a field merged into `/state`,
+deliberately: `/state` is a verbatim pass-through of pi's `get_state` and tests
+assert on its shape, so the build info goes beside it, not inside it.
+
+Tests: `tests/version.test.sh` (9 checks, including a missing `build.json` and
+that `/state` gained nothing) and three cases in `tests/ui.test.js` for the
+badge itself — matching, mismatched, and absent.

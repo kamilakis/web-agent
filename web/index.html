@@ -163,6 +163,16 @@ header .rename {
 }
 header .rename:hover { opacity:1; background:rgba(128,128,128,.18); }
 header .rename svg { width:11px; height:11px; }
+header .build {
+  flex:0 0 auto; cursor:pointer;
+  background:none; border:0; padding:2px 0; margin:0;
+  color:var(--dim); font:500 10px/1 var(--mono);
+  opacity:.7; white-space:nowrap;
+}
+header .build:active { opacity:1; }
+/* On a phone the header is already toggle + mark + name + status + model, so
+   the commit step is desktop-only (it is in the tap toast either way). */
+@media (max-width:560px) { header .build .commit { display:none; } }
 header .spacer { flex:1 1 auto; }
 .status { display:flex; align-items:center; gap:5px; flex:0 0 auto; }
 .dot { width:7px; height:7px; border-radius:50%; background:var(--dim); flex:0 0 auto; }
@@ -423,6 +433,7 @@ footer {
   <div class="spacer"></div>
   <div class="status"><span class="dot warn" id="statusDot"></span><span id="statusText">connecting…</span></div>
   <select id="modelSel" title="model" aria-label="model"></select>
+  <button id="buildBadge" class="build" type="button" title="build"></button>
 </header>
 <div id="banner" hidden>
   <span id="bannerTitle"></span>
@@ -455,7 +466,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-25.3';
+const UI_VERSION = '2026-09-25.4';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -575,6 +586,8 @@ const banner = document.getElementById('banner');
 const bannerTitle = document.getElementById('bannerTitle');
 const bannerResume = document.getElementById('bannerResume');
 const bannerDelete = document.getElementById('bannerDelete');
+const buildBadge = document.getElementById('buildBadge');
+let buildInfo = null;   // GET /version: what the daemon says it is
 const foot = document.getElementById('foot');
 let viewing = null;   // {file, dir, title} while a past session is open read-only
 let sessions;         // undefined = endpoint missing (pre-restart daemon), null = fetch failed
@@ -689,7 +702,43 @@ async function refreshHeader() {
     // follow /state or it keeps showing the model the user picked before it.
     applyModelToSelect(st.model);
   } catch {}
+  loadBuild();
 }
+
+// The build badge (top right). "Keep versioning" is only useful if the running
+// pair is visible: the dashboard knows its own UI_VERSION from the file it was
+// served, and /version reports the daemon's. They are bumped together, so a
+// difference means the page is ahead of the daemon — e.g. a button whose
+// endpoint 404s.
+async function loadBuild() {
+  try {
+    buildInfo = await fetch('/version', {headers: H}).then(r => r.json());
+  } catch {
+    buildInfo = null;
+  }
+  renderBuildBadge();
+}
+function renderBuildBadge() {
+  buildBadge.textContent = '';
+  buildBadge.appendChild(el('span', 'ver', 'v' + UI_VERSION));
+  if (buildInfo && buildInfo.commit) {
+    buildBadge.appendChild(el('span', 'commit', ' · ' + buildInfo.commit));
+  }
+  const bits = ['dashboard ' + UI_VERSION];
+  if (buildInfo && buildInfo.daemon) {
+    bits.push('daemon ' + buildInfo.daemon +
+              (buildInfo.commit ? ' (' + buildInfo.commit + ')' : ''));
+    if (buildInfo.built) bits.push('installed ' + buildInfo.built);
+    if (buildInfo.daemon !== UI_VERSION) {
+      bits.push('\u26a0 dashboard and daemon differ \u2014 restart the daemon');
+    }
+  } else {
+    // An older daemon has no /version at all: say so rather than imply a match.
+    bits.push('daemon version unknown \u2014 restart the daemon');
+  }
+  buildBadge.title = bits.join(' · ');
+}
+buildBadge.onclick = () => sbMsg(buildBadge.title, 8000);
 
 // Show `m` in the model dropdown, adding it if the list does not carry it
 // (AGENT_MODEL can be a model /models does not offer).
@@ -1517,6 +1566,7 @@ console.info('[web-agent] dashboard ui ' + UI_VERSION);
   } catch {}
   connectSSE();
   loadSessions();
+  loadBuild();
 })();
 </script>
 </body>

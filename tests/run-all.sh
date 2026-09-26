@@ -18,6 +18,7 @@ run node toolRows.test.js
 run node ui.test.js
 run bash opensession.test.sh
 run bash delete.test.sh
+run bash version.test.sh
 run bash errors.test.sh
 run bash resume.test.sh
 

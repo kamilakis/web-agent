@@ -103,6 +103,13 @@ VISION_PROVIDER, VISION_MODEL_ID = VISION_MODEL.split("/", 1)
 DISPATCH_TIMEOUT = int(os.environ.get("AGENT_DISPATCH_TIMEOUT", "30"))
 JANITOR_INTERVAL = int(os.environ.get("AGENT_JANITOR_INTERVAL", "15"))
 TRASH_DAYS = int(os.environ.get("AGENT_TRASH_DAYS", "30"))
+
+# What this build is. Bump DAEMON_VERSION with every daemon change: the
+# dashboard shows it next to its own UI_VERSION, so a page running against a
+# stale daemon (which is how "resume needs a daemon restart" happens) is
+# visible instead of guessed at. install.sh records the git commit alongside.
+DAEMON_VERSION = "2026-09-25.4"
+BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
 os.makedirs(STATE, exist_ok=True)
@@ -271,6 +278,22 @@ def _newest_session_file():
     if not paths:
         return None
     return max(paths, key=lambda p: os.path.getmtime(p))
+
+
+def build_info():
+    """This daemon's version, plus the commit install.sh recorded in
+    $AGENT_SESSION_DIR/build.json. A missing build file is not an error —
+    a hand-copied daemon just reports its version alone."""
+    info = {"daemon": DAEMON_VERSION, "commit": None, "built": None}
+    try:
+        with open(BUILD_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            info["commit"] = d.get("commit") or None
+            info["built"] = d.get("built") or None
+    except (OSError, ValueError):
+        pass
+    return info
 
 
 def log(*a):
@@ -1503,6 +1526,8 @@ class Handler(BaseHTTPRequestHandler):
             self._sse()
         elif path == "/state":
             self._command({"type": "get_state"})
+        elif path == "/version":
+            self._json(build_info())
         elif path == "/messages":
             self._messages()
         elif path == "/sessions":

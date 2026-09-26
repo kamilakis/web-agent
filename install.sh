@@ -14,6 +14,14 @@ install -m 644 web/index.html "$STATE/web/index.html"
 # out of the attachments tree -- so they have to be installed, not just shipped
 install -m 644 web/site/* "$STATE/attachments/site/"
 install -m 644 systemd/*.service "$UNITS/"
+
+# What is deployed, as the dashboard's build badge shows it (GET /version). The
+# commit comes from the checkout this ran in; a tarball install just says so.
+REPO=$(cd "$(dirname "$0")" && pwd)
+COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)
+printf '{"commit":"%s","built":"%s"}\n' \
+       "${COMMIT:-unknown}" "$(date -Is)" > "$STATE/build.json"
+
 systemctl --user daemon-reload
 systemctl --user enable --now agent-session.service agent-matrix-listener.service
 

@@ -79,6 +79,11 @@ across surfaces.
     flight is aborted first; a `session_switched` SSE event tells every open
     tab to refresh. RPC `new_session` was deliberately **not** used: it mints
     a random session id and would orphan the session on the next restart.
+  - `GET /version` — what the running daemon is: `DAEMON_VERSION` plus the
+    commit and timestamp `install.sh` wrote to `$AGENT_SESSION_DIR/build.json`
+    (absent is fine — a hand-copied daemon reports its version alone). The
+    dashboard renders it in the build badge; `/state` stays an untouched pi
+    pass-through.
   - `POST /deletesession {file, dir}` — **soft-delete** a past transcript: it
     moves to `$AGENT_SESSION_DIR/trash/` with a timestamp suffix, and the
     janitor purges trashed files older than `AGENT_TRASH_DAYS` (default 30
@@ -165,6 +170,7 @@ node tests/ui.test.js          # one suite
 | `ui.test.js` | the page under a stub DOM: error surfacing, resume, two tabs |
 | `opensession.test.sh` | resume against the daemon: T1–T8, T13 |
 | `delete.test.sh` | delete against the daemon: D1–D6, D8 |
+| `version.test.sh` | `GET /version`, and that `/state` stays a pure pass-through |
 | `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
 | `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
 
@@ -180,6 +186,12 @@ nothing personal is baked in.
 | `AGENT_PROVIDER` / `AGENT_MODEL` | `deepseek` / `deepseek-v4-pro` | pi provider and model |
 | `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
 | `AGENT_TRASH_DAYS` | `30` | days a deleted transcript stays in `trash/` before the janitor purges it |
+
+The dashboard also shows a **build badge** (top right): its own `UI_VERSION`
+and, from `GET /version`, the running daemon's `DAEMON_VERSION` and the commit
+`install.sh` recorded. The two versions are bumped together, so a mismatch —
+typically a new page against a daemon that has not been restarted — is visible
+rather than guessed at. Tap it for the full string.
 | `AGENT_SESSION_ID` | `siri-agent` | session id = memory key; change to wipe |
 | `AGENT_SESSION_NAME` | `siri-agent` | display name for new sessions (the web UI can name them per-session) |
 | `AGENT_TASK_WAIT` | `15` | seconds Siri holds the SSH call open |
