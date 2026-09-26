@@ -112,11 +112,19 @@ USAGE_REFRESH = int(os.environ.get("AGENT_USAGE_REFRESH", "30"))
 USAGE_INTERVAL = int(os.environ.get("AGENT_USAGE_INTERVAL", "900"))
 USAGE_CMD = os.environ.get("AGENT_USAGE_CMD", "")
 
+# §21 approval gate: how long a question from an extension may wait for an
+# answer, and how long to wait for a dashboard to appear at all before giving
+# up. The old code cancelled every dialog instantly ("v1 auto-cancels") because
+# nothing could answer it; now the dashboard can, but a run must still never
+# hang forever on a phone that is not looking.
+UI_TIMEOUT = int(os.environ.get("AGENT_UI_TIMEOUT", "180"))
+UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
+
 # What this build is. Bump DAEMON_VERSION with every daemon change: the
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-26.2"
+DAEMON_VERSION = "2026-09-26.3"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -463,6 +471,7 @@ class Daemon:
         self.last_web_asked = None
         self.model_input = None         # current model's input types (None = unknown)
         self.usage = None               # §20 usage/balance snapshot for /usage
+        self.ui_pending = {}            # §21 extension dialogs awaiting an answer
         self.current_out_dir = None     # §15: this turn's out dir, scanned at settle
         self.req_seq = 0
         self.stdin_lock = threading.Lock()          # serialize writes to pi stdin
@@ -1358,6 +1367,8 @@ class Daemon:
                     # else: a continuation of the run already in flight. Keep
                     # source, prompt, caller id and accumulated text untouched.
             elif t == "agent_settled":
+                # Any dialog still open belongs to the run that just ended.
+                self.cancel_pending_ui("the run ended")
                 if self.busy:
                     self.settle()
                 else:
@@ -1379,13 +1390,7 @@ class Daemon:
                 if ev.get("command") == "prompt" and ev.get("success") is False:
                     self.on_prompt_rejected(rid, ev.get("error"))
             elif t == "extension_ui_request":
-                log("extension UI request:", ev.get("method"), ev.get("title"))
-                if ev.get("method") in ("select", "confirm", "input", "editor") \
-                        and not ev.get("timeout"):
-                    # A dialog with no timeout would hang the run forever; v1
-                    # auto-cancels. The web UI will answer these in v2.
-                    self.send_cmd({"type": "extension_ui_response",
-                                   "id": ev.get("id"), "cancelled": True})
+                self.on_ui_request(ev)
             elif t == "auto_retry_start":
                 log("pi auto-retry", ev.get("attempt"), "of", ev.get("maxAttempts"),
                     "in", ev.get("delayMs"), "ms:", ev.get("errorMessage"))
@@ -1528,6 +1533,84 @@ class Daemon:
             with self.lock:
                 self.usage = snap
             time.sleep(USAGE_REFRESH)
+
+    # ---- extension dialogs (§21) ---------------------------------------
+    def on_ui_request(self, ev):
+        """An extension wants an answer from a human.
+
+        pi only emits these for methods that carry a decision; notify/setTitle/
+        setStatus need no reply and are just logged. Relaying rather than
+        auto-cancelling is the whole point: the approval gate asks through
+        here, and until now every question was answered 'cancelled' the
+        instant it was asked, so a mutating tool call was refused without the
+        user ever seeing it.
+        """
+        method = ev.get("method")
+        if method not in ("select", "confirm", "input", "editor"):
+            log("extension UI:", method, ev.get("title") or ev.get("message") or "")
+            return
+        rid = ev.get("id")
+        req = {"type": "ui_request", "id": rid, "method": method,
+               "title": ev.get("title") or "", "asked": time.time()}
+        for key in ("message", "options", "placeholder", "prefill"):
+            if ev.get(key) is not None:
+                req[key] = ev[key]
+        with self.lock:
+            self.ui_pending[rid] = req
+        log("extension UI request:", method, "->", (req.get("title") or "")[:80])
+        self.broadcast(req)
+        threading.Thread(target=self._ui_watchdog, args=(rid,), daemon=True).start()
+
+    def _ui_watchdog(self, rid):
+        """No question may hang a run forever. Wait for an answer, giving up
+        sooner if nothing is connected that could possibly give one."""
+        started = time.time()
+        deadline = started + UI_TIMEOUT
+        while time.time() < deadline:
+            time.sleep(1.0)
+            with self.lock:
+                if rid not in self.ui_pending:
+                    return
+                watching = len(self.clients)
+            if not watching and time.time() - started >= UI_NOUI_GRACE:
+                self.resolve_ui(rid, cancelled=True,
+                                why="no dashboard is connected to ask")
+                return
+        self.resolve_ui(rid, cancelled=True, why="nobody answered in time")
+
+    def resolve_ui(self, rid, value=None, confirmed=None, cancelled=False, why=""):
+        """Answer one pending dialog. Returns False if it is already gone, so a
+        second tab cannot answer twice."""
+        with self.lock:
+            req = self.ui_pending.pop(rid, None)
+        if req is None:
+            return False
+        resp = {"type": "extension_ui_response", "id": rid}
+        if cancelled:
+            resp["cancelled"] = True
+        elif confirmed is not None:
+            resp["confirmed"] = bool(confirmed)
+        else:
+            resp["value"] = value if value is not None else ""
+        try:
+            self.send_cmd(resp)
+        except Exception as e:              # pi can die between ask and answer
+            log("could not deliver the UI answer:", e)
+        shown = "cancelled" if cancelled else (
+            value if value is not None else str(confirmed))
+        log("extension UI answered:", req.get("method"), "->", shown,
+            *(("(" + why + ")",) if why else ()))
+        self.broadcast({"type": "ui_resolved", "id": rid,
+                        "method": req.get("method"),
+                        "cancelled": bool(cancelled), "why": why,
+                        "value": None if cancelled else value})
+        return True
+
+    def cancel_pending_ui(self, why):
+        with self.lock:
+            ids = list(self.ui_pending)
+        for rid in ids:
+            self.resolve_ui(rid, cancelled=True, why=why)
 
     def purge_trash(self):
         """Remove trashed transcripts older than TRASH_DAYS. Before that,
@@ -1747,6 +1830,12 @@ class Handler(BaseHTTPRequestHandler):
             with self.d.lock:
                 snap = self.d.usage
             self._json(snap or {"error": "no usage snapshot yet"})
+        elif path == "/ui":
+            # So a page that loads (or reconnects) can still answer a question
+            # that was asked while it was away.
+            with self.d.lock:
+                pending = list(self.d.ui_pending.values())
+            self._json({"pending": pending})
         elif path == "/messages":
             self._messages()
         elif path == "/sessions":
@@ -1874,6 +1963,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 log("deletesession error:", e)
                 self._json({"error": str(e)}, 500)
+        elif path == "/ui_response":
+            # The dashboard's answer to an extension dialog (§21). Idempotent:
+            # a second tab that answers the same question is told it is gone
+            # rather than sending pi a second response.
+            rid = body.get("id")
+            if not rid:
+                self._json({"error": "id required"}, 400)
+                return
+            if body.get("cancelled"):
+                done = Handler.d.resolve_ui(rid, cancelled=True,
+                                            why="cancelled from the dashboard")
+            elif "confirmed" in body:
+                done = Handler.d.resolve_ui(rid, confirmed=bool(body["confirmed"]))
+            else:
+                done = Handler.d.resolve_ui(rid, value=body.get("value"))
+            if done:
+                self._json({"ok": True})
+            else:
+                self._json({"error": "no such request, or already answered"}, 409)
         elif path == "/sessionname":
             name = (body.get("name") or "").strip()[:80]
             if not name:

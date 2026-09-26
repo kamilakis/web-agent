@@ -16,11 +16,16 @@ run() {
 run node describeTool.test.js
 run node toolRows.test.js
 run node ui.test.js
+# The approval gate lives outside this repo (pi auto-discovers it); run its
+# classifier table too when it is installed.
+GATE="$HOME/.pi/agent/extensions/approval-gate/classify.test.mjs"
+[ -f "$GATE" ] && run node "$GATE"
 run bash opensession.test.sh
 run bash delete.test.sh
 run bash version.test.sh
 run bash service.test.sh
 run bash usage.test.sh
+run bash ui-relay.test.sh
 run bash errors.test.sh
 run bash resume.test.sh
 

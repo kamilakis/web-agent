@@ -34,7 +34,12 @@ helper() {   # helper <file> <json-printf-args…>
 echo "=== the transcript totals are provider-agnostic (no helper involved)"
 reset_state
 seed_usage_transcript live.jsonl 0.01 3
-FAKE_PI_SCENARIO=ok FAKE_PI_SESSION="$ST/sessions/live.jsonl" start_daemon
+# AGENT_USAGE_CMD is emptied deliberately: the shell running the tests inherits
+# the LIVE daemon's environment, which sets it in a systemd drop-in, so without
+# this the daemon under test would find a real helper and the "no balance" case
+# would pass or fail depending on who ran the suite.
+FAKE_PI_SCENARIO=ok FAKE_PI_SESSION="$ST/sessions/live.jsonl" \
+  AGENT_USAGE_CMD= start_daemon
 sleep 1.5
 U=$(api GET /usage)
 ok "$(code GET /usage)" "200" "200 OK"

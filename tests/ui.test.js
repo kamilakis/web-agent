@@ -403,6 +403,72 @@ console.log('=== snapshot reload: errored assistant message is visible');
   await tick();
   ok(X.byId['usage'].hidden === true, 'an old daemon hides the line rather than guessing');
 
+  console.log('=== Part 21: an extension question reaches the user');
+  const Y = newTab();
+  Object.assign(Y.routes, BASE_ROUTES(stateD));
+  Y.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  ok(vm.runInContext('uiReq === null', Y.ctx) === true, 'no dialog until something asks');
+  Y.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q1', method: 'select',
+    title: '⚠️  Run shell command?',
+    options: ['1) Allow once', '2) Allow for this session', '3) Deny', '4) Deny, but instead…']})});
+  await tick();
+  ok(Y.byId['uiDialog'].hidden === false, 'the dialog appears');
+  ok(Y.byId['uiTitle'].textContent.includes('Run shell command'), 'with the question');
+  const btns = Y.byId['uiOpts'].children;
+  ok(btns.length === 4, 'and one button per option (got ' + btns.length + ')');
+  ok(btns[1].textContent.includes('Allow for this session'), 'labelled with the option text');
+  ok(Y.byId['uiText'].hidden === true, 'no text field for a select');
+
+  await btns[1].onclick();
+  await tick();
+  const ans = Y.posts.find(p => p.path === '/ui_response');
+  ok(!!ans, 'answering POSTs to /ui_response');
+  ok(ans && ans.body.id === 'q1', 'with the question id');
+  ok(ans && ans.body.value === '2) Allow for this session', 'and the chosen option');
+  ok(Y.byId['uiDialog'].hidden === true, 'and closes the dialog');
+
+  console.log('=== Part 21: confirm, input, and a timeout notice');
+  const Z = newTab();
+  Object.assign(Z.routes, BASE_ROUTES(stateD));
+  Z.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  Z.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q2', method: 'confirm',
+    title: '⚠️  Really?'})});
+  await tick();
+  const yn = Z.byId['uiOpts'].children.map(b => b.textContent);
+  ok(JSON.stringify(yn), JSON.stringify(['Yes', 'No']), 'confirm offers Yes/No');
+  Z.ctx.onEvent({data: JSON.stringify({type: 'ui_resolved', id: 'q2',
+    cancelled: true, why: 'nobody answered in time', method: 'confirm'})});
+  await tick();
+  ok(Z.byId['uiDialog'].hidden === true, 'ui_resolved closes it');
+  ok(/nobody answered in time/.test(Z.byId['sbNote'].textContent), 'and says why');
+
+  const AA = newTab();
+  Object.assign(AA.routes, BASE_ROUTES(stateD));
+  AA.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  AA.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q3', method: 'input',
+    title: 'Instead, I should…', placeholder: 'e.g. use the dashboard'})});
+  await tick();
+  ok(AA.byId['uiText'].hidden === false, 'input shows a text field');
+  ok(AA.byId['uiSend'].hidden === false, 'and a send button');
+  AA.byId['uiText'].value = 'ask me first';
+  await AA.byId['uiSend'].onclick();
+  await tick();
+  const tin = AA.posts.find(p => p.path === '/ui_response');
+  ok(tin && tin.body.value === 'ask me first', 'the typed instruction is sent');
+
+  console.log('=== Part 21: a question asked while the page was away');
+  const AB = newTab();
+  Object.assign(AB.routes, BASE_ROUTES(stateD));
+  AB.routes['/ui'] = {json: {pending: [{id: 'q9', method: 'select', title: '⚠️  Still waiting',
+                                       options: ['1) Allow once', '2) Deny']}]}};
+  AB.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  ok(AB.byId['uiDialog'].hidden === false, 'a reload picks up the pending question');
+  ok(AB.byId['uiTitle'].textContent.includes('Still waiting'), 'and shows it');
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');

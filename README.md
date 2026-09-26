@@ -234,6 +234,44 @@ the line shows credit left plus spend since the top-up, anchored on
 `topup_total` (see `live-stats/bin/deepseek-usage`, which owns both the helper
 and that anchor).
 
+## Approval gate
+
+A pi extension (`~/.pi/agent/extensions/approval-gate/`) asks before anything
+changes. Read-only commands run without a prompt:
+
+| | |
+|---|---|
+| **Runs unattended** | `ls`, `cat`, `head`, `wc`, `grep`, `rg`, `find` (without `-exec`/`-delete`), `sed -n`, `awk` (without `system(`/`>`/`|`), `jq`, `git status\|log\|diff\|show\|branch -a`, `curl` (reads), `dig`, `ping`, `ps`, `df`, `journalctl`, `echo`, `date`… |
+| **Asks first** | anything that writes, deletes, escalates, executes code or leaves the box: `rm mv cp mkdir touch chmod tee`, any `>`/`>>` redirect, `sed -i`, `find -exec`, `xargs`, `sudo systemctl kill reboot`, `git commit\|push\|reset\|clean\|apply`, `python node sh bash`, `make npm pip`, `ssh scp rsync`, `docker`, `docker`, and **anything not on the allowlist** |
+
+Every segment of a compound command must be a read (`ls && rm x` asks), and a
+redirection anywhere makes it a write (`echo hi > f` asks). A wrong *ask* costs
+one tap; a wrong *allow* changes something nobody agreed to, so unknown
+commands always ask. The reasoning is shown in the dialog (`why ask: …`).
+
+Approval choices: **Allow once**, **Allow for this session** (in-memory, resets
+on restart), **Deny**, and **Deny, but instead…** — the last one hands your typed
+instruction back to the agent as the block reason, so it can correct course.
+`/gate on|off|status|forget` controls it; `/gate forget` clears the session
+allow-list.
+
+**In the dashboard** a question appears as a modal with a button per option, so
+it reaches you wherever you are — phones included — instead of waiting on a
+tty. A question asked while the page was closed is picked up on reload
+(`GET /ui`). Nothing hangs forever: an unanswered question is cancelled after
+`AGENT_UI_TIMEOUT` (default 180s), or after `AGENT_UI_NOUI_GRACE` (15s) when no
+dashboard is connected at all — which is what lets Siri and Matrix turns fail
+closed rather than sit there.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `AGENT_UI_TIMEOUT` | `180` | seconds an extension question waits for an answer |
+| `AGENT_UI_NOUI_GRACE` | `15` | seconds to wait for a dashboard to appear before cancelling |
+
+`tests/ui-relay.test.sh` covers the round trip (select, confirm, input, cancel,
+timeout, no-UI); `classify.test.mjs` next to the extension holds the 123-case
+classification table.
+
 ## Tests
 
 No dependencies, no network, and **nothing touches the live agent** — every
@@ -253,6 +291,7 @@ node tests/ui.test.js          # one suite
 | `delete.test.sh` | delete against the daemon: D1–D6, D8 |
 | `version.test.sh` | `GET /version`, and that `/state` stays a pure pass-through |
 | `usage.test.sh` | `GET /usage`: transcript totals, balance helpers, and their failure modes |
+| `ui-relay.test.sh` | extension dialogs reach the dashboard and the answer reaches pi |
 | `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
 | `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
 

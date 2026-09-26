@@ -85,6 +85,13 @@ def run_prompt(rid):
     global SCEN
     emit({"type": "response", "id": rid, "command": "prompt", "success": True})
     emit({"type": "agent_start"})
+    # FAKE_PI_UI models an extension asking a question mid-run (the approval
+    # gate): the daemon must relay it and forward the answer back here.
+    ui = os.environ.get("FAKE_PI_UI")
+    if ui:
+        req = json.loads(ui)
+        ui_id = req.pop("id", "ui-1")
+        emit({"type": "extension_ui_request", "id": ui_id, **req})
     if SCEN == "retry":
         emit({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
               "delayMs": 10, "errorMessage": "529 overloaded"})
@@ -184,6 +191,8 @@ for line in sys.stdin:
               "success": True, "data": {"cleared": 0}})
     elif t == "prompt":
         run_prompt(rid)
+    elif t == "extension_ui_response":
+        pass                     # the daemon's answer to a dialog we raised
     elif t == "set_session_name":
         name = cmd.get("name")
         emit({"type": "response", "id": rid, "command": "set_session_name",

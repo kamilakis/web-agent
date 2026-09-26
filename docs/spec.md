@@ -1426,3 +1426,65 @@ In the page it is one dim line above the composer, tapping gives the full
 detail. `tests/usage.test.sh` (21 checks) covers the totals, the helper
 contract, a helper that errors, one that is missing entirely, and the
 provider switch.
+
+## 21. The approval gate asked nobody (fixed 2026-09-26)
+
+Two independent bugs made the gate deny every mutating call while showing no
+question anywhere — and made read-only commands ask for permission they did not
+need.
+
+**1. Every bash command was gated.** `GATED_TOOLS = ["bash", "write", "edit"]`
+with no inspection of the command, so `ls` and `cat` cost a keystroke.
+`classify.js` now decides per command line: a table of readers (with the flags
+that turn each into a writer — `sed -i`, `find -exec`, `sort -o`, `rg --pre`),
+the mutators (anything that writes, escalates, executes, or leaves the box), a
+subcommand allowlist for `git`, and **fail-closed** for anything unrecognised.
+Every segment of `a && b | c` must be a read, and any `>` redirect makes it a
+write. 123 cases in `classify.test.mjs`.
+
+**2. The question could never arrive — twice over.**
+
+*In the extension:* pi's RPC mode implements `ctx.ui.custom()` as
+`async custom(){}` — a no-op that resolves immediately. The gate opened with
+`await ctx.ui.custom(...)`, so in the web/Siri session it got `undefined`,
+skipped its `catch` fallback (nothing threw), and fell through to
+`block: "Denied by user (approval gate)"`. It never asked. The docs say to guard
+terminal-only UI with `ctx.mode === "tui"`, which is what it does now, falling
+back to `ctx.ui.select()`.
+
+*In the daemon:* even had it asked, `extension_ui_request` was answered
+
+```python
+# A dialog with no timeout would hang the run forever; v1 auto-cancels.
+self.send_cmd({"type": "extension_ui_response", "id": ev.get("id"), "cancelled": True})
+```
+
+— every select/confirm/input/editor cancelled on arrival, which is also why the
+log only ever showed `notify` (that is the `/gate` command's own toast). The
+daemon now relays: the request is broadcast over SSE as `ui_request`, the
+dashboard answers at `POST /ui_response`, and the answer is forwarded to pi with
+the same id. `GET /ui` lists anything still pending, so a reload can still
+answer. Dialogs are cancelled when the run they belong to ends, a second tab
+gets 409 rather than answering twice, and `_ui_watchdog` closes anything
+unanswered after `AGENT_UI_TIMEOUT` (180s) — or after `AGENT_UI_NOUI_GRACE`
+(15s) when no dashboard is connected, preserving the fail-closed behaviour the
+old comment was reaching for.
+
+Verified against **real pi**, not just the fake:
+
+```
+prompt: "Run exactly this shell command: ls /tmp"
+  → questions asked: 0            (auto-approved, tool ran)
+prompt: "Run exactly this shell command: touch /tmp/gate-e2e-probe"
+  → GATE ASKED  "⚠️  Run shell command? $ touch /tmp/gate-e2e-probe  why ask: …"
+     options: 1) Allow once  2) Allow for this session  3) Deny  4) Deny, but instead…
+  → answered "3) Deny" → /tmp/gate-e2e-probe was NOT created
+```
+
+`tests/ui-relay.test.sh` (17 checks) holds the round trip permanently —
+select/confirm/input, cancel, a second answer refused, the no-UI grace, and the
+timeout.
+
+Note: the extension lives in `~/.pi/agent/extensions/approval-gate/`, which is
+**not under version control** — which is how a change this consequential sat
+broken unnoticed. Moving it into a repo is an open follow-up.
