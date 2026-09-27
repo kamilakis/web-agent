@@ -523,7 +523,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-26.4';
+const UI_VERSION = '2026-09-27.1';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -940,10 +940,13 @@ function startUiCountdown(req) {
 async function answerUi(option) {
   const req = uiReq;
   if (!req) return;
+  // The shape follows the dialog's method, never the label: a select option
+  // or a typed answer that happens to read "Yes"/"No" is still a value.
   let payload = {cancelled: true};
-  if (option === 'Yes') payload = {confirmed: true};
-  else if (option === 'No') payload = {confirmed: false};
-  else if (option !== undefined && option !== null) payload = {value: option};
+  if (option !== undefined && option !== null) {
+    payload = req.method === 'confirm' ? {confirmed: option === 'Yes'}
+                                       : {value: option};
+  }
   hideUiDialog();
   try {
     const r = await fetch('/ui_response', {
@@ -1167,7 +1170,10 @@ function errorBubble(text) {
 // transcript can never inject markup into the page.
 function mdToHtml(src) {
   const blocks = [];
-  let s = String(src).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  // Quotes too: a link's URL lands inside href="…", and an unescaped " there
+  // let agent output add attributes (onclick=…) to the <a>.
+  let s = String(src).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   s = s.replace(/```([\s\S]*?)```/g, (m, code) => {
     blocks.push(code.replace(/^[A-Za-z0-9_+-]*\n/, '').replace(/\n$/, ''));
     return '\u0000' + (blocks.length - 1) + '\u0000';
