@@ -24,6 +24,8 @@ its state, its session, its FIFO — is not reachable from here.
 | `opensession.test.sh` | Part A against the daemon: T1–T8, T13, B6 |
 | `delete.test.sh` | Part C against the daemon: D1–D6, D8 |
 | `errors.test.sh` | §17.4 regression: failed runs are surfaced, Siri gets a spoken failure |
+| `hardening.test.sh` | the review's lower-severity fixes, daemon-level and unit-level |
+| `install.test.sh` | `install.sh` against a stubbed `systemctl` |
 | `resume.test.sh` | §17.7 / T10: restart resumes the recorded transcript |
 
 ## Fake pi controls

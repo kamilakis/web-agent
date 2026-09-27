@@ -9,6 +9,8 @@ reply returns to the same room (the daemon already posts to Matrix whenever a
 prompt has no synchronous Siri waiter, which is exactly this case).
 
 Env overrides:
+  AGENT_SESSION_DIR        the daemon's state dir, where its FIFO lives
+                           (default ~/.local/share/agent-session)
   AGENT_MATRIX_STATE_DIR   dir holding the last sync token
                            (default ~/.local/state/agent-matrix-listener)
   AGENT_MATRIX_SENDERS     comma-separated sender allowlist
@@ -36,8 +38,12 @@ SENDERS = os.environ.get("AGENT_MATRIX_SENDERS", "")
 TIMEOUT = int(os.environ.get("AGENT_MATRIX_TIMEOUT", "30000"))
 DRYRUN = os.environ.get("AGENT_MATRIX_DRYRUN") == "1"
 
-FIFO = os.path.expanduser("~/.local/share/agent-session/in.fifo")
-LOG = os.path.expanduser("~/.local/share/agent-session/matrix-listener.log")
+# The daemon's state dir — same variable and default as agent-session-daemon
+# and agent-task, so a non-default AGENT_SESSION_DIR reaches the right FIFO.
+SESSION_DIR = os.environ.get(
+    "AGENT_SESSION_DIR", os.path.expanduser("~/.local/share/agent-session"))
+FIFO = os.path.join(SESSION_DIR, "in.fifo")
+LOG = os.path.join(SESSION_DIR, "matrix-listener.log")
 
 os.makedirs(STATE_DIR, exist_ok=True)
 

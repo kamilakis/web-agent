@@ -14,8 +14,8 @@ Env overrides:
   AGENT_SESSION_DIR   state dir (default ~/.local/share/agent-session)
   AGENT_SESSION_WORKDIR   pi working dir (default ~/assistant)
   AGENT_SESSION_ID    pi session id (default "siri-agent")
-  AGENT_PROVIDER      pi --provider (default "anthropic")
-  AGENT_MODEL         pi --model (default "claude-opus-4-8")
+  AGENT_PROVIDER      pi --provider (default "deepseek")
+  AGENT_MODEL         pi --model (default "deepseek-v4-pro")
   AGENT_QUIET_MATRIX  if "1", do not post; just log (for testing)
 """
 import os
@@ -23,6 +23,7 @@ import sys
 import json
 import time
 import queue
+import collections
 import shlex
 import shutil
 import base64
@@ -129,7 +130,7 @@ UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-27.2"
+DAEMON_VERSION = "2026-09-27.3"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -284,7 +285,7 @@ def session_messages(path, cap=4000):
     """A past session file -> {messages: [...]} in the same shape as the live
     /messages snapshot (thinking stripped, tool results capped, image blobs
     dropped), so the dashboard renders history with the same renderer."""
-    out = []
+    out = collections.deque(maxlen=cap)   # the newest `cap`, not the oldest
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -349,9 +350,7 @@ def session_messages(path, cap=4000):
                     entry["toolName"] = m.get("toolName")
                 entry["isError"] = bool(m.get("isError"))
             out.append(entry)
-            if len(out) >= cap:
-                break
-    return {"messages": out}
+    return {"messages": list(out)}
 
 
 def _valid_session_file(path):
@@ -400,6 +399,31 @@ def build_info():
 
 
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def augment_path():
+    """Make PATH complete for pi and everything it shells out to — by adding,
+    never replacing.
+
+    A boot-time user unit gets systemd's default PATH, without ~/.local/bin
+    (2026-09-21: FileNotFoundError 'pi'). Pinning PATH in the unit fixed that
+    but threw away whatever else the environment carried (/usr/sbin on some
+    setups, /usr/local/go/bin, ~/go/bin, …) for the agent's shell. So: the
+    daemon's own dir and ~/.local/bin go first, the standard system dirs are
+    appended if missing, and everything already on PATH stays. Anything more
+    (Go, cargo) belongs in ~/.config/environment.d/, which the user manager
+    reads at boot too.
+    """
+    have = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    first = [BIN_DIR, os.path.expanduser("~/.local/bin")]
+    last = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin",
+            "/sbin", "/bin"]
+    out = [p for p in first if p not in have] + have
+    out += [p for p in last if p not in out]
+    os.environ["PATH"] = os.pathsep.join(out)
+
+
+augment_path()
 
 
 def find_bin(name, env_var=None):
@@ -472,11 +496,13 @@ class Daemon:
         self.cur_text = []              # text deltas of the in-flight message
         self.last_text = None           # final assistant text of current run
         self.last_error = None          # terminal error of the current run (§17)
+        self.last_aborted = False       # the run was stopped (abort), not finished
         self.last_web_message = None    # last web prompt (for steer-turned-run case)
         self.last_web_asked = None
         self.model_input = None         # current model's input types (None = unknown)
         self.usage = None               # §20 usage/balance snapshot for /usage
         self.ui_pending = {}            # §21 extension dialogs awaiting an answer
+        self.ui_pi_closes = set()       # ...of those, ones pi times out itself
         self.current_out_dir = None     # §15: this turn's out dir, scanned at settle
         self.req_seq = 0
         self.stdin_lock = threading.Lock()          # serialize writes to pi stdin
@@ -628,6 +654,7 @@ class Daemon:
             self.cur_text = []
             self.last_text = None
             self.last_error = None
+            self.last_aborted = False
             self.req_seq += 1
             rid = f"fifo-{self.req_seq}"
             self.dispatch_map[rid] = {"source": source, "pid": pid, "prompt": prompt,
@@ -661,7 +688,11 @@ class Daemon:
                                  "is in progress — stop it first, or switch to a "
                                  "vision model"}
             try:
-                self.model_set(VISION_PROVIDER, VISION_MODEL_ID)
+                resp = self.model_set(VISION_PROVIDER, VISION_MODEL_ID) or {}
+                if resp.get("success") is False:
+                    raise RuntimeError(resp.get("error") or "pi refused set_model")
+                if not self._model_accepts_images():
+                    raise RuntimeError("the model still reports no image input")
             except Exception as e:
                 log("auto-switch to vision model failed:", e)
                 return {"error": f"couldn't switch to vision model "
@@ -696,6 +727,7 @@ class Daemon:
                 self.cur_text = []
                 self.last_text = None
                 self.last_error = None
+                self.last_aborted = False
                 self.dispatch_map[rid] = {"source": "web", "pid": None,
                                           "prompt": message, "attempts": 0}
                 if images:
@@ -824,6 +856,7 @@ class Daemon:
             self.cur_text = []
             self.last_text = None
             self.last_error = None
+            self.last_aborted = False
             self.current_out_dir = None
             self.dispatch_map.clear()
             # §2.4/B1: a switch silently puts pi back on the daemon's --model,
@@ -850,7 +883,12 @@ class Daemon:
 
     def _switch_to_new(self, archive, name=None):
         self._abort_and_settle()
+        # B8, as in _open_session: a run that did not settle after the abort
+        # would otherwise leave its Siri/Matrix caller waiting for nothing.
+        stale = self._interrupted_caller()
         self._reset_run_state()
+        if stale:
+            self._notify_interrupted(stale)
         try:
             st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
         except TimeoutError as e:
@@ -902,6 +940,11 @@ class Daemon:
                 moved = dest
             except OSError as e:
                 log("archive move failed:", e)
+                # pi IS on the new file: record it and tell the tabs, or the
+                # next restart resumes the old transcript and pages go stale.
+                self.record_active_session(new_file)
+                self.broadcast({"type": "session_switched", "archived": False,
+                                "newFile": new_file})
                 return {"error": f"session switched, but the archive move "
                                  f"failed: {e}"}
         log("SESSION SWITCHED:", "archive" if archive else "new",
@@ -1131,17 +1174,21 @@ class Daemon:
         """
         with self.lock:
             info = self.dispatch_map.pop(rid, None)
+            if info is None:
+                # Not a dispatch we are waiting on (a rejected steer, say):
+                # clearing the guard here would let another pending
+                # Siri/Matrix run be attributed to the web when it starts.
+                return
             self.dispatch_pending = False
             self.pending_start_source = None
             self.dispatch_deadline = None
-            if info is None:
-                return
             if not self.busy:
                 self.current_prompt = None
                 self.current_id = None
                 self.current_asked = None
                 self.cur_text = []
                 self.last_error = None
+                self.last_aborted = False
             attempts = (info.get("attempts") or 0) + 1
         log("prompt rejected by pi:", err, "| attempt", attempts,
             "| prompt:", info.get("prompt"))
@@ -1177,10 +1224,12 @@ class Daemon:
             pid = self.current_id
             answer = self.last_text
             error = self.last_error
+            aborted = self.last_aborted
             asked = self.current_asked or time.time()
             out_dir = self.current_out_dir
             self.current_out_dir = None
             self.last_error = None
+            self.last_aborted = False
             self.busy = False
             self.dispatch_pending = False
             self.dispatch_deadline = None
@@ -1201,8 +1250,14 @@ class Daemon:
         # Siri/Matrix get an explicit failure line; the web dashboard renders
         # the error from the message_end event (and from the snapshot) itself.
         spoken = answer or (f"⚠ The agent failed: {error}" if error else "")
+        status = "error" if error else ("aborted" if aborted else "ok")
+        if aborted and not error:
+            # A stopped run used to be spoken as "Done." (no text) or as its
+            # partial text with status ok — a silent non-answer, like §17.
+            note = "⚠ Stopped before it finished."
+            spoken = f"{answer}\n\n{note}" if answer else note
         task_path = self.write_task_log(pid, prompt, answer, asked, now, delivered,
-                                        status="error" if error else "ok", error=error)
+                                        status=status, error=error)
         if source == "siri" and pid:
             # Synchronous caller is polling for this file. If they consume it
             # (delete) before GRACE elapses, no Matrix message is sent — the
@@ -1269,9 +1324,16 @@ class Daemon:
             clients = list(self.clients)
         for q in clients:
             try:
-                q.put_nowait(line)   # drop-slowest; never block the event loop
+                q.put_nowait(line)   # never block the event loop
             except queue.Full:
-                pass
+                # A client this far behind has already missed events; carrying
+                # on would leave it wrong (a lost agent_settled sticks it on
+                # "working…", a lost ui_request hides a question). Cut it off:
+                # EventSource reconnects and re-reads the snapshot and /ui.
+                with self.clients_lock:
+                    if q in self.clients:
+                        self.clients.remove(q)
+                q.overflowed = True
 
     def _clean_for_clients(self, ev):
         """Strip the §15 attachment hint from user messages before they reach
@@ -1342,12 +1404,19 @@ class Daemon:
                         with self.lock:
                             self.last_error = err
                         log("RUN ERROR:", err.replace("\n", " "))
+                    elif m.get("stopReason") == "aborted":
+                        # Stop / a session switch. Not a finished answer: the
+                        # partial text must not be spoken or posted as if it were.
+                        with self.lock:
+                            self.last_aborted = True
+                        log("RUN ABORTED")
                     elif m.get("stopReason") in ("stop", "toolUse", "length"):
                         # pi retries provider errors automatically (auto_retry_*);
                         # a later successful response means the run recovered, so
                         # the earlier failure is no longer this run's outcome.
                         with self.lock:
                             self.last_error = None
+                            self.last_aborted = False
             elif t == "agent_start":
                 # pi emits agent_start for EVERY low-level run, so one prompt
                 # produces several: one per auto-retry, one per compaction
@@ -1376,6 +1445,7 @@ class Daemon:
                         self.cur_text = []
                         self.last_text = None
                         self.last_error = None
+                        self.last_aborted = False
                     # else: a continuation of the run already in flight. Keep
                     # source, prompt, caller id and accumulated text untouched.
             elif t == "agent_settled":
@@ -1516,36 +1586,56 @@ class Daemon:
         stale number, it is the wrong one.
         """
         balance, balance_provider, next_balance = None, None, 0.0
+        cache_key, cache_totals = None, None
         while True:
-            provider, model_id, path = "", "", None
             try:
-                st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
-                d = st.get("data") or {}
-                model_id = (d.get("model") or {}).get("id") or ""
-                provider = (d.get("model") or {}).get("provider") or ""
-                path = d.get("sessionFile")
-            except TimeoutError:
-                pass
-            if provider != balance_provider:
-                balance, balance_provider, next_balance = None, provider, 0.0
-            if time.time() >= next_balance:
-                next_balance = time.time() + USAGE_INTERVAL
-                got = self.read_balance(provider)
-                if got is not None:
-                    balance = got
-                else:
-                    balance = None      # nothing to ask for this provider
-            snap = {"provider": provider, "model": model_id, "file": path,
-                    "fetched": time.time()}
-            if balance:
-                snap["balance"] = balance
-            if path and os.path.isfile(path):
-                totals = transcript_usage(path, day_start=self._day_start())
-                if totals:
-                    snap.update(totals)
-            with self.lock:
-                self.usage = snap
+                balance, balance_provider, next_balance, cache_key, cache_totals = \
+                    self._usage_tick(balance, balance_provider, next_balance,
+                                     cache_key, cache_totals)
+            except Exception as e:
+                # One bad line or a helper surprise must not freeze /usage for
+                # the life of the daemon (the thread used to just die).
+                log("usage refresh failed:", repr(e))
             time.sleep(USAGE_REFRESH)
+
+    def _usage_tick(self, balance, balance_provider, next_balance,
+                    cache_key, cache_totals):
+        """One refresh of the /usage snapshot; returns the carried state."""
+        provider, model_id, path = "", "", None
+        try:
+            st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
+            d = st.get("data") or {}
+            model_id = (d.get("model") or {}).get("id") or ""
+            provider = (d.get("model") or {}).get("provider") or ""
+            path = d.get("sessionFile")
+        except TimeoutError:
+            pass
+        if provider != balance_provider:
+            balance, balance_provider, next_balance = None, provider, 0.0
+        if time.time() >= next_balance:
+            next_balance = time.time() + USAGE_INTERVAL
+            got = self.read_balance(provider)
+            if got is not None:
+                balance = got
+            else:
+                balance = None      # nothing to ask for this provider
+        snap = {"provider": provider, "model": model_id, "file": path,
+                "fetched": time.time()}
+        if balance:
+            snap["balance"] = balance
+        if path and os.path.isfile(path):
+            # The live transcript only changes when a turn lands; re-summing
+            # the whole file every USAGE_REFRESH is wasted I/O otherwise.
+            st_ = os.stat(path)
+            key = (path, st_.st_size, st_.st_mtime_ns, self._day_start())
+            if key != cache_key:
+                cache_key = key
+                cache_totals = transcript_usage(path, day_start=key[3])
+            if cache_totals:
+                snap.update(cache_totals)
+        with self.lock:
+            self.usage = snap
+        return balance, balance_provider, next_balance, cache_key, cache_totals
 
     # ---- extension dialogs (§21) ---------------------------------------
     def on_ui_request(self, ev):
@@ -1563,14 +1653,23 @@ class Daemon:
             log("extension UI:", method, ev.get("title") or ev.get("message") or "")
             return
         rid = ev.get("id")
+        # The extension may set its own timeout (ms); pi then closes the dialog
+        # itself when it runs out. The deadline shown and enforced is whichever
+        # comes first, and if it is pi's, the daemon must not answer after it.
+        now = time.time()
+        own = ev.get("timeout")
+        own_s = own / 1000.0 if isinstance(own, (int, float)) and own > 0 else None
+        pi_first = own_s is not None and own_s < UI_TIMEOUT
         req = {"type": "ui_request", "id": rid, "method": method,
-               "title": ev.get("title") or "", "asked": time.time(),
-               "deadline": time.time() + UI_TIMEOUT}
+               "title": ev.get("title") or "", "asked": now,
+               "deadline": now + (own_s if pi_first else UI_TIMEOUT)}
         for key in ("message", "options", "placeholder", "prefill"):
             if ev.get(key) is not None:
                 req[key] = ev[key]
         with self.lock:
             self.ui_pending[rid] = req
+            if pi_first:
+                self.ui_pi_closes.add(rid)
         log("extension UI request:", method, "->", (req.get("title") or "")[:80])
         self.broadcast(req)
         threading.Thread(target=self._ui_watchdog, args=(rid,), daemon=True).start()
@@ -1579,7 +1678,9 @@ class Daemon:
         """No question may hang a run forever. Wait for an answer, giving up
         sooner if nothing is connected that could possibly give one."""
         started = time.time()
-        deadline = started + UI_TIMEOUT
+        with self.lock:
+            req = self.ui_pending.get(rid) or {}
+        deadline = req.get("deadline") or started + UI_TIMEOUT
         while time.time() < deadline:
             time.sleep(1.0)
             with self.lock:
@@ -1590,13 +1691,20 @@ class Daemon:
                 self.resolve_ui(rid, cancelled=True,
                                 why="no dashboard is connected to ask")
                 return
-        self.resolve_ui(rid, cancelled=True, why="nobody answered in time")
+        with self.lock:
+            pi_closes = rid in self.ui_pi_closes
+        # When the extension's own timeout was the sooner one, pi has already
+        # closed the dialog: just take it off the dashboard, answer nothing.
+        self.resolve_ui(rid, cancelled=True, why="nobody answered in time",
+                        send=not pi_closes)
 
-    def resolve_ui(self, rid, value=None, confirmed=None, cancelled=False, why=""):
+    def resolve_ui(self, rid, value=None, confirmed=None, cancelled=False, why="",
+                   send=True):
         """Answer one pending dialog. Returns False if it is already gone, so a
         second tab cannot answer twice."""
         with self.lock:
             req = self.ui_pending.pop(rid, None)
+            self.ui_pi_closes.discard(rid)
         if req is None:
             return False
         resp = {"type": "extension_ui_response", "id": rid}
@@ -1607,7 +1715,8 @@ class Daemon:
         else:
             resp["value"] = value if value is not None else ""
         try:
-            self.send_cmd(resp)
+            if send:
+                self.send_cmd(resp)
         except Exception as e:              # pi can die between ask and answer
             log("could not deliver the UI answer:", e)
         shown = "cancelled" if cancelled else (
@@ -2016,7 +2125,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def _sse(self):
-        q = queue.Queue(maxsize=200)
+        q = queue.Queue(maxsize=1000)
+        q.overflowed = False
         d = Handler.d
         with d.clients_lock:
             d.clients.append(q)
@@ -2029,7 +2139,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"retry: 3000\n\n")
             self.wfile.flush()
-            while True:
+            while not q.overflowed:
                 try:
                     line = q.get(timeout=15)
                 except queue.Empty:
@@ -2047,7 +2157,8 @@ class Handler(BaseHTTPRequestHandler):
             with d.clients_lock:
                 if q in d.clients:
                     d.clients.remove(q)
-            log("SSE client disconnected:", self.client_address[0])
+            log("SSE client disconnected:", self.client_address[0],
+                *(("(fell behind; dropped so it resyncs)",) if q.overflowed else ()))
 
 
 def main():
