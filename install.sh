@@ -16,7 +16,7 @@ UNITS="$PREFIX/.config/systemd/user"
 
 mkdir -p "$BIN" "$STATE/web" "$UNITS" "$STATE/attachments/site"
 install -m 755 bin/agent-session-daemon bin/agent-task \
-               bin/agent-matrix-listener bin/matrix-notify "$BIN/"
+               bin/agent-matrix-listener bin/matrix-notify bin/agent-update "$BIN/"
 install -m 644 web/index.html "$STATE/web/index.html"
 # the dashboard's icons are referenced as /media/site/*, which the daemon serves
 # out of the attachments tree -- so they have to be installed, not just shipped
@@ -29,8 +29,11 @@ COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)
 if [ -n "$COMMIT" ] && [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
     COMMIT="$COMMIT-dirty"       # uncommitted changes: the hash alone would lie
 fi
-printf '{"commit":"%s","built":"%s"}\n' \
-       "${COMMIT:-unknown}" "$(date -Is)" > "$STATE/build.json"
+# `repo` is where the dashboard's Update button (agent-update) pulls from.
+REPO_JSON=""
+[ -d "$REPO/.git" ] && REPO_JSON=$REPO
+printf '{"commit":"%s","built":"%s","repo":"%s"}\n' \
+       "${COMMIT:-unknown}" "$(date -Is)" "$REPO_JSON" > "$STATE/build.json"
 
 systemctl --user daemon-reload
 systemctl --user enable agent-session.service agent-matrix-listener.service

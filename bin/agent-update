@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Update web-agent from its git checkout: fast-forward, test, install, verify,
+# and roll back if the new build does not come up.
+#
+# Run by agent-update.service (started from the dashboard's Update button via
+# POST /update). It must be its own unit: install.sh restarts agent-session,
+# and systemd stops everything in that unit's cgroup — an updater started as
+# a child of the daemon would be killed halfway through its own install.
+#
+# Refuses, without touching anything, unless the checkout is clean, on
+# AGENT_UPDATE_BRANCH, and can fast-forward to its origin. Never merges, never
+# rebases, never touches the remote. Progress and the outcome go to
+# $AGENT_SESSION_DIR/update.json (the dashboard reads it); the full output to
+# update.log next to it.
+#
+# Env:
+#   AGENT_SESSION_DIR          state dir (default ~/.local/share/agent-session)
+#   AGENT_REPO_DIR             the checkout (default: "repo" in build.json)
+#   AGENT_UPDATE_BRANCH        branch to follow (default master)
+#   AGENT_UPDATE_SKIP_TESTS    1 = do not run tests/run-all.sh first
+#   AGENT_UPDATE_HEALTH_WAIT   seconds for the new daemon to answer (default 90)
+set -uo pipefail
+
+STATE="${AGENT_SESSION_DIR:-$HOME/.local/share/agent-session}"
+BRANCH="${AGENT_UPDATE_BRANCH:-master}"
+WAIT="${AGENT_UPDATE_HEALTH_WAIT:-90}"
+STATUS="$STATE/update.json"
+LOG="$STATE/update.log"
+HEALTH="$STATE/health.json"
+export GIT_TERMINAL_PROMPT=0
+# A unit started by the user manager may not have these; node, pi and the
+# helpers usually live here.
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+mkdir -p "$STATE"
+exec >>"$LOG" 2>&1
+echo
+echo "=== agent-update $(date -Is)"
+
+FROM="" TO="" STARTED=$(date +%s)
+
+# status <state> <stage> <message> — atomically replace update.json
+status() {
+  python3 - "$STATUS" "$1" "$2" "$3" "$FROM" "$TO" "$STARTED" <<'PY'
+import json, os, sys, time
+path, state, stage, msg, frm, to, started = sys.argv[1:8]
+d = {"state": state, "stage": stage, "message": msg, "from": frm or None,
+     "to": to or None, "started": int(started), "updated": int(time.time())}
+if state != "running":
+    d["finished"] = int(time.time())
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(d, f)
+os.replace(tmp, path)
+PY
+  echo "[$1/$2] $3"
+}
+fail()    { status failed "$1" "$2"; exit 1; }
+refused() { status refused check "$1"; exit 2; }
+
+exec 9>"$STATE/update.lock"
+if ! flock -n 9; then
+  echo "another update is already running"
+  exit 3
+fi
+
+REPO="${AGENT_REPO_DIR:-}"
+if [ -z "$REPO" ] && [ -f "$STATE/build.json" ]; then
+  REPO=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("repo") or "")' \
+         "$STATE/build.json" 2>/dev/null)
+fi
+[ -n "$REPO" ] && [ -d "$REPO/.git" ] \
+  || refused "no git checkout recorded — run ./install.sh from the checkout once"
+git() { command git -C "$REPO" "$@"; }
+
+status running check "checking the checkout"
+for tool in git python3 flock; do
+  command -v "$tool" >/dev/null || refused "$tool is not on PATH"
+done
+if [ "${AGENT_UPDATE_SKIP_TESTS:-0}" != "1" ]; then
+  for tool in node curl; do
+    command -v "$tool" >/dev/null \
+      || refused "$tool is not on PATH (needed by the tests; add its dir in ~/.config/environment.d, or set AGENT_UPDATE_SKIP_TESTS=1)"
+  done
+fi
+cur=$(git symbolic-ref --quiet --short HEAD) || refused "the checkout is not on a branch"
+[ "$cur" = "$BRANCH" ] || refused "the checkout is on '$cur', not '$BRANCH'"
+[ -z "$(git status --porcelain)" ] || refused "the checkout has uncommitted changes"
+
+status running fetch "fetching origin/$BRANCH"
+# timeout runs the git binary, not the git() function above, hence -C here
+timeout 120 git -C "$REPO" fetch --quiet origin "$BRANCH" || fail fetch "git fetch failed"
+PREV=$(git rev-parse HEAD)
+NEW=$(git rev-parse "origin/$BRANCH")
+git merge-base --is-ancestor "$PREV" "$NEW" \
+  || refused "origin/$BRANCH has diverged from the checkout — not a fast-forward"
+TO=$(git rev-parse --short "$NEW")
+
+# Where to go back to if the new build fails: what is INSTALLED, which is not
+# necessarily the checkout's HEAD (a `git pull` without ./install.sh).
+INSTALLED=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("commit") or "").split("-")[0])' \
+            "$STATE/build.json" 2>/dev/null)
+ROLLBACK=$PREV
+if [ -n "$INSTALLED" ] && R=$(git rev-parse --quiet --verify "$INSTALLED^{commit}") \
+   && git merge-base --is-ancestor "$R" "$NEW"; then
+  ROLLBACK=$R
+fi
+FROM=$(git rev-parse --short "$ROLLBACK")
+if [ "$ROLLBACK" = "$NEW" ]; then
+  status ok done "already up to date ($TO)"
+  exit 0
+fi
+
+git merge --ff-only --quiet "$NEW" || fail fetch "fast-forward to $TO failed"
+echo "fast-forwarded to $TO (installed: $FROM)"
+
+# back_to <commit> — move the local branch back. The checkout was clean, so
+# nothing of the user's is lost, and the remote is never touched.
+back_to() { git reset --quiet --hard "$1"; }
+
+if [ "${AGENT_UPDATE_SKIP_TESTS:-0}" != "1" ]; then
+  status running test "running the tests at $TO"
+  if ! (cd "$REPO" && bash tests/run-all.sh); then
+    back_to "$PREV"
+    fail test "tests failed at $TO — nothing was installed; $FROM is still running (see update.log)"
+  fi
+fi
+
+# wait_healthy <commit> <since> — the restarted daemon writes health.json once
+# pi answers get_state; it has to be the new build, written after the restart.
+wait_healthy() {
+  local want=$1 since=$2 i
+  for i in $(seq 1 "$WAIT"); do
+    if python3 - "$HEALTH" "$want" "$since" <<'PY' 2>/dev/null; then
+import json, sys
+h = json.load(open(sys.argv[1]))
+ok = (h.get("commit") or "").split("-")[0] == sys.argv[2] and h.get("at", 0) >= float(sys.argv[3])
+sys.exit(0 if ok else 1)
+PY
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+status running install "installing $TO (the daemon restarts)"
+since=$(date +%s)
+if (cd "$REPO" && ./install.sh) && wait_healthy "$TO" "$since"; then
+  status ok done "updated $FROM -> $TO"
+  exit 0
+fi
+
+echo "the new build did not come up; rolling back to $FROM"
+status running rollback "the new build did not come up — rolling back to $FROM"
+back_to "$ROLLBACK"
+since=$(date +%s)
+if (cd "$REPO" && ./install.sh) && wait_healthy "$FROM" "$since"; then
+  status rolled_back done "$TO did not come up within ${WAIT}s — rolled back to $FROM"
+  exit 1
+fi
+fail rollback "$TO did not come up, and neither did the rollback to $FROM — check: journalctl --user -u agent-session"

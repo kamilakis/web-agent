@@ -26,6 +26,8 @@ its state, its session, its FIFO — is not reachable from here.
 | `errors.test.sh` | §17.4 regression: failed runs are surfaced, Siri gets a spoken failure |
 | `hardening.test.sh` | the review's lower-severity fixes, daemon-level and unit-level |
 | `install.test.sh` | `install.sh` against a stubbed `systemctl` |
+| `update.test.sh` | §22 the daemon's update check and `POST /update`, against a local bare "origin" |
+| `agent-update.test.sh` | §22 `bin/agent-update` on a toy checkout: fast-forward, test, install, rollback, refusals |
 | `resume.test.sh` | §17.7 / T10: restart resumes the recorded transcript |
 
 ## Fake pi controls

@@ -107,6 +107,22 @@ body {
   border:1px solid var(--border); border-radius:8px;
   font-size:13px; cursor:pointer; place-items:center;
 }
+/* §22 update bar: a new build on the branch, an update in progress, or how
+   the last one ended. Same slot and shape as #banner. */
+#updateBar {
+  flex:0 0 auto; display:flex; align-items:center; gap:10px;
+  padding:7px 14px; background:var(--surface);
+  border-bottom:1px solid var(--border); font-size:12.5px;
+}
+#updateBar.bad { color:var(--danger); }
+#updateText { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#updateBar button {
+  flex:0 0 auto; cursor:pointer; padding:5px 12px; border-radius:999px;
+  border:1px solid var(--border); background:var(--elev); color:var(--text);
+  font:600 12px/1 var(--sans);
+}
+#updateBar #updateGo { background:var(--accent); color:var(--accent-ink); }
+#updateBar button:disabled { opacity:.55; cursor:default; }
 #banner {
   flex:0 0 auto; display:flex; align-items:center; gap:10px;
   padding:8px 14px; background:var(--surface);
@@ -502,6 +518,11 @@ footer {
   <select id="modelSel" title="model" aria-label="model"></select>
   <button id="buildBadge" class="build" type="button" title="build"></button>
 </header>
+<div id="updateBar" hidden>
+  <span id="updateText"></span>
+  <button id="updateGo" type="button" hidden>Update</button>
+  <button id="updateLater" type="button">Later</button>
+</div>
 <div id="banner" hidden>
   <span id="bannerTitle"></span>
   <button id="bannerResume" type="button">▶ Resume</button>
@@ -546,7 +567,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.6';
+const UI_VERSION = '2026-09-27.7';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -832,6 +853,127 @@ function renderBuildBadge() {
   buildBadge.title = bits.join(' · ');
 }
 buildBadge.onclick = () => sbMsg(buildBadge.title, 8000);
+
+// ---- §22 self-update ----
+// The daemon checks its git checkout for new commits (GET /update); Update
+// starts agent-update.service, which tests, installs, restarts the daemon and
+// rolls back if the new build does not come up. The page follows along and
+// reloads itself once a different build is serving it.
+const updateBar = document.getElementById('updateBar');
+const updateText = document.getElementById('updateText');
+const updateGo = document.getElementById('updateGo');
+const updateLater = document.getElementById('updateLater');
+let updateInfo = null;
+let updatePoll = null;
+let pageCommit;          // the build this page was served by (first /version)
+let reloadPending = false;
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+
+async function loadUpdate() {
+  try {
+    const r = await fetch('/update', {headers: H});
+    updateInfo = r.ok ? await r.json() : null;
+  } catch { /* a restart in progress: keep the last state */ }
+  renderUpdate();
+}
+function showUpdateBar(text, {go = false, bad = false, later = 'Later', title = ''} = {}) {
+  updateText.textContent = text;
+  updateBar.title = title || text;
+  updateGo.hidden = !go;
+  updateGo.disabled = false;
+  updateLater.hidden = !later;
+  updateLater.textContent = later || 'Later';
+  updateBar.classList.toggle('bad', bad);
+  updateBar.hidden = false;
+}
+function renderUpdate() {
+  const u = updateInfo || {};
+  const run = u.run || {};
+  const running = run.state === 'running' && Date.now() / 1000 - (run.updated || 0) < 1800;
+  if (running && !updatePoll) updatePoll = setInterval(loadUpdate, 3000);
+  if (!running && updatePoll) { clearInterval(updatePoll); updatePoll = null; }
+  if (reloadPending) {
+    showUpdateBar('A new version is installed', {later: 'Reload'});
+    updateLater.onclick = () => location.reload();
+    return;
+  }
+  updateLater.onclick = dismissUpdate;
+  if (running) {
+    showUpdateBar('Updating' + (run.to ? ' to ' + run.to : '') + ': ' + (run.message || '…'),
+                  {later: ''});
+    return;
+  }
+  const endedRecently = run.finished && Date.now() / 1000 - run.finished < 3600;
+  if (endedRecently && run.state !== 'ok' && lsGet('wa-update-seen') !== String(run.finished)) {
+    showUpdateBar('Update ' + (run.state === 'rolled_back' ? 'rolled back' : run.state) +
+                  ': ' + (run.message || ''), {bad: true, later: 'OK'});
+    return;
+  }
+  if (u.available && lsGet('wa-update-later') !== u.latest) {
+    const list = (u.commits || []).map(c => c.sha + '  ' + c.subject).join('\n');
+    const first = (u.commits && u.commits[0]) ? ' \u00b7 ' + u.commits[0].subject : '';
+    const n = u.behind || (u.commits || []).length;
+    if (u.can_update) {
+      showUpdateBar('Update available \u00b7 ' + n + ' commit' + (n === 1 ? '' : 's') + first,
+                    {go: true, title: list});
+    } else {
+      showUpdateBar('Update available, but ' + (u.blocked || u.error || 'it cannot be applied'),
+                    {bad: true, title: list});
+    }
+    return;
+  }
+  updateBar.hidden = true;
+}
+function dismissUpdate() {
+  const u = updateInfo || {};
+  const run = u.run || {};
+  if (run.finished && run.state !== 'ok') lsSet('wa-update-seen', String(run.finished));
+  if (u.available && u.latest) lsSet('wa-update-later', u.latest);
+  updateBar.hidden = true;
+}
+updateGo.onclick = async () => {
+  const u = updateInfo || {};
+  const list = (u.commits || []).slice(0, 8).map(c => '\u2022 ' + c.subject).join('\n');
+  let q = 'Update to ' + (u.latest || 'the latest commit') + '?\n\n' + list +
+          '\n\nThe tests run first; then it installs and restarts the daemon, ' +
+          'and rolls back if the new build does not come up.';
+  if (working || uiReq) q += '\nThe running reply will be stopped.';
+  if (!confirm(q)) return;
+  updateGo.disabled = true;
+  try {
+    const r = await fetch('/update', {method: 'POST',
+      headers: {...H, 'Content-Type': 'application/json'},
+      body: JSON.stringify({force: true})});
+    const res = await r.json().catch(() => ({}));
+    if (res.error) { sbMsg(res.error); updateGo.disabled = false; return; }
+  } catch { sbMsg('could not start the update'); updateGo.disabled = false; return; }
+  await loadUpdate();
+};
+// After a reconnect: is a different build serving us now? Then reload, unless
+// that would throw away something the user is in the middle of.
+async function checkNewBuild() {
+  await loadBuild();
+  const now = buildInfo && buildInfo.commit;
+  if (pageCommit === undefined) { pageCommit = now || null; return; }
+  if (!now || now === pageCommit) return;
+  if (!(input.value || "").trim() && !uiReq && !pendingImage && !viewing) {
+    location.reload();
+    return;
+  }
+  reloadPending = true;
+  renderUpdate();
+}
+// Once, after the reload an update caused: say what happened.
+function announceUpdate() {
+  const run = (updateInfo || {}).run || {};
+  const cur = (buildInfo && buildInfo.commit) || '';
+  if (run.state !== 'ok' || !run.to || !cur.startsWith(run.to)) return;
+  if (Date.now() / 1000 - (run.finished || 0) > 600) return;
+  if (lsGet('wa-update-seen') === String(run.finished)) return;
+  lsSet('wa-update-seen', String(run.finished));
+  sbMsg('Updated to ' + run.to + (run.from ? ' (from ' + run.from + ')' : ''), 8000);
+}
 
 // §20 The usage line. The cost comes from pi's own `usage` blocks in the
 // transcript, which every provider writes, so it keeps working when the model
@@ -1639,6 +1781,10 @@ function onEvent(e) {
   let ev;
   try { ev = JSON.parse(e.data); } catch { return; }
   const t = ev.type;
+  if (t === 'update_available' || t === 'update_started') {   // §22
+    loadUpdate();
+    return;
+  }
   if (t === 'ui_request') {      // §21 must reach the user even while viewing
     enqueueUi(ev);
     return;
@@ -1764,6 +1910,7 @@ function connectSSE() {
   es.onmessage = onEvent;
   es.onopen = async () => {
     if (!firstOpen) loadPendingUi();   // §21 events missed while disconnected
+    if (!firstOpen) { checkNewBuild(); loadUpdate(); }   // §22 a restart = maybe a new build
     if (!firstOpen && !working && !viewing) {
       try { const msgs = await fetch('/messages', {headers:H}).then(r=>r.json()); renderSnapshot(msgs.messages || []); } catch {}
     }
@@ -1886,10 +2033,12 @@ console.info('[web-agent] dashboard ui ' + UI_VERSION);
   } catch {}
   connectSSE();
   loadSessions();
-  loadBuild();
   loadUsage();
   loadPendingUi();
   setInterval(loadUsage, 60000);   // the daemon caches; this is a local read
+  await checkNewBuild();           // records the build this page came from
+  await loadUpdate();
+  announceUpdate();
 })();
 </script>
 </body>

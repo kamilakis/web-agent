@@ -80,6 +80,8 @@ across surfaces.
     flight is aborted first; a `session_switched` SSE event tells every open
     tab to refresh. RPC `new_session` was deliberately **not** used: it mints
     a random session id and would orphan the session on the next restart.
+  - `GET /update`, `POST /update/check`, `POST /update` — the self-update
+    check and the Update button (see *Updating from the dashboard*)
   - `GET /version` — what the running daemon is: `DAEMON_VERSION` plus the
     commit and timestamp `install.sh` wrote to `$AGENT_SESSION_DIR/build.json`
     (absent is fine — a hand-copied daemon reports its version alone). The
@@ -200,6 +202,48 @@ systemd retried six seconds later. So:
 `tests/service.test.sh` runs the daemon with a PATH stripped of every place pi
 could live, including one case with nothing installed at all.
 
+## Updating from the dashboard
+
+Once `./install.sh` has run from a git checkout, later updates need no shell.
+The daemon checks that checkout for new commits on `master` every 15 minutes
+(`git fetch` only; nothing moves). When there are some, a bar under the header
+says so — *Update available · 2 commits · smaller text…*, with the commit list
+in its tooltip — and offers **Update** and **Later**.
+
+**Update** starts `agent-update.service`, a one-shot unit of its own, which:
+
+1. refuses, touching nothing, unless the checkout is clean, on `master`, and
+   can fast-forward (the bar says so up front, with no button, when it can't);
+2. fast-forwards and runs `tests/run-all.sh` — a failure stops it there, with
+   the checkout moved back and the old build still running;
+3. runs `./install.sh`, which restarts the daemon (a reply in flight is
+   stopped; the button says so when one is);
+4. waits for the new build to answer (`health.json`, written once pi answers
+   `get_state`), and if it does not within 90s, **rolls back**: the previous
+   commit is checked out and installed again.
+
+The bar shows each stage while it runs. When the new build is up, open pages
+reload themselves — except one with a half-written message or an open
+question, which gets a **Reload** button instead — and say *Updated to …*.
+Everything the updater did is in `$AGENT_SESSION_DIR/update.log`, its outcome
+in `update.json`.
+
+It is its own unit because `install.sh` restarts `agent-session`, and systemd
+stops everything in that unit along with it: an updater started as the daemon's
+child would kill itself halfway through. The remote is only ever read; a
+failed test or rollback only moves the local branch back to where it was.
+
+The tests need `node` and `curl` on the unit's PATH. If node lives somewhere
+unusual, add its dir in `~/.config/environment.d/`, or skip the tests with a
+drop-in for `agent-update.service` (`Environment=AGENT_UPDATE_SKIP_TESTS=1`).
+
+| Var | Default | Meaning |
+|---|---|---|
+| `AGENT_UPDATE_CHECK` | `900` | seconds between update checks; `0` turns them off |
+| `AGENT_UPDATE_BRANCH` | `master` | the branch to follow |
+| `AGENT_UPDATE_SKIP_TESTS` | `0` | (agent-update.service) `1` installs without running the tests |
+| `AGENT_UPDATE_HEALTH_WAIT` | `90` | (agent-update.service) seconds for the new build to answer before rolling back |
+
 ## Usage line
 
 The dashboard shows one dim line above the composer: what the current model has
@@ -310,6 +354,8 @@ node tests/ui.test.js          # one suite
 | `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
 | `hardening.test.sh` | stopped runs, slow SSE clients, dialog timeouts, usage/archive/vision edge cases |
 | `install.test.sh` | `install.sh` restarts what it installed (stubbed `systemctl`) |
+| `update.test.sh` | the daemon's update check and `POST /update`, against a local bare "origin" |
+| `agent-update.test.sh` | `bin/agent-update`: fast-forward, test, install, rollback, refusals |
 | `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
 
 See `tests/README.md` for the fake pi's controls and the known gaps.

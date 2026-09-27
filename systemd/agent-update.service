@@ -1,0 +1,14 @@
+[Unit]
+Description=Update web-agent from its git checkout (fast-forward, test, install, verify)
+# Started on demand by the dashboard (POST /update), never at boot: no [Install].
+# It is a unit of its own because install.sh restarts agent-session, and a
+# process in that unit's cgroup would be stopped along with it.
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-update
+# The test suite runs first and takes a few minutes.
+TimeoutStartSec=20min
+# Settings go in a drop-in (agent-update.service.d/*.conf), e.g.:
+#   Environment=AGENT_UPDATE_SKIP_TESTS=1
+#   Environment=AGENT_SESSION_DIR=...   # only if the daemon's is not the default
