@@ -66,6 +66,17 @@ has "$(cat "$st/out")" "starting pi:" "pi was started"
 hasnt "$(cat "$st/out")" "FileNotFoundError" "no FileNotFoundError"
 has "$(cat "$st/out")" "$LAYOUT/a/pi" "and it ran the pi next to it"
 
+echo "=== A2: pi's PATH is extended, never replaced"
+install_daemon "$LAYOUT/a2"
+install -m 755 "$REPO/tests/fakebin/pi" "$LAYOUT/a2/pi"
+BARE_PATH=/opt/keepme/bin:/usr/bin:/bin \
+  run_one a2 "$LAYOUT/a2" "$ST/home-a2" FAKE_PI_PATHLOG="$ST/a2-path" >/dev/null
+P=$(head -1 "$ST/a2-path" 2>/dev/null)
+has ":$P:" ":$LAYOUT/a2:" "the daemon's own dir is on it"
+has ":$P:" ":$ST/home-a2/.local/bin:" "and ~/.local/bin"
+has ":$P:" ":/opt/keepme/bin:" "and what the environment already had is kept"
+has ":$P:" ":/usr/sbin:" "and the system sbin dirs are there"
+
 echo "=== B: pi only via the ~/.local/bin fallback"
 install_daemon "$LAYOUT/b"
 mkdir -p "$ST/home-b/.local/bin"

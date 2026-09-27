@@ -112,7 +112,8 @@ cd web-agent
 
 `install.sh` copies `bin/*` to `~/.local/bin`, the chat to
 `~/.local/share/agent-session/web/`, and the units to
-`~/.config/systemd/user/`, then enables and starts both services.
+`~/.config/systemd/user/`, then enables both services and restarts them so
+the new code is what runs (`NO_RESTART=1 ./install.sh` to restart later yourself).
 
 ### Post-install
 
@@ -184,9 +185,14 @@ user unit started before any login has imported the environment gets systemd's
 default PATH, which does not include it; the service only came up because
 systemd retried six seconds later. So:
 
-- the unit pins `Environment=PATH=%h/.local/bin:…`, and the daemon also looks
-  for its helpers next to its own binary (`find_bin()`), with `AGENT_PI_BIN` as
-  an override;
+- the daemon finds its helpers next to its own binary (`find_bin()`), with
+  `AGENT_PI_BIN` as an override, and at startup **extends** PATH for pi and
+  everything it runs: its own dir and `~/.local/bin` first, the standard system
+  dirs appended, nothing already there removed. (An earlier fix pinned PATH in
+  the unit, which dropped every other directory the environment carried.) Add
+  dirs of your own, such as Go's, in `~/.config/environment.d/50-path.conf`:
+  `PATH=/usr/local/go/bin:$HOME/go/bin:${PATH}` — the user manager reads it at
+  boot too;
 - `Restart=always` with `StartLimitIntervalSec=0` — an always-on chat service
   keeps retrying rather than sitting dead after a burst of failures.
 
@@ -239,13 +245,13 @@ and that anchor).
 ## Approval gate
 
 A pi extension asks before anything: source in `~/assistant/pi-extensions/approval-gate/`,
-symlinked into `~/.pi/agent/extensions/` so pi discovers it
-changes. Read-only commands run without a prompt:
+symlinked into `~/.pi/agent/extensions/` so pi discovers it (and so its
+changes are under version control). Read-only commands run without a prompt:
 
 | | |
 |---|---|
 | **Runs unattended** | `ls`, `cat`, `head`, `wc`, `grep`, `rg`, `find` (without `-exec`/`-delete`), `sed -n`, `awk` (without `system(`/`>`/`|`), `jq`, `git status\|log\|diff\|show\|branch -a`, `curl` (reads), `dig`, `ping`, `ps`, `df`, `journalctl`, `echo`, `date`… |
-| **Asks first** | anything that writes, deletes, escalates, executes code or leaves the box: `rm mv cp mkdir touch chmod tee`, any `>`/`>>` redirect, `sed -i`, `find -exec`, `xargs`, `sudo systemctl kill reboot`, `git commit\|push\|reset\|clean\|apply`, `python node sh bash`, `make npm pip`, `ssh scp rsync`, `docker`, `docker`, and **anything not on the allowlist** |
+| **Asks first** | anything that writes, deletes, escalates, executes code or leaves the box: `rm mv cp mkdir touch chmod tee`, any `>`/`>>` redirect, `sed -i`, `find -exec`, `xargs`, `sudo systemctl kill reboot`, `git commit\|push\|reset\|clean\|apply`, `python node sh bash`, `make npm pip`, `ssh scp rsync`, `docker`, and **anything not on the allowlist** |
 
 Every segment of a compound command must be a read (`ls && rm x` asks), and a
 redirection anywhere makes it a write (`echo hi > f` asks). A wrong *ask* costs
@@ -301,13 +307,16 @@ node tests/ui.test.js          # one suite
 | `usage.test.sh` | `GET /usage`: transcript totals, balance helpers, and their failure modes |
 | `ui-relay.test.sh` | extension dialogs reach the dashboard and the answer reaches pi |
 | `errors.test.sh` | a failed run is surfaced, never a silent empty answer |
+| `hardening.test.sh` | stopped runs, slow SSE clients, dialog timeouts, usage/archive/vision edge cases |
+| `install.test.sh` | `install.sh` restarts what it installed (stubbed `systemctl`) |
 | `resume.test.sh` | a restart resumes the recorded transcript, not the oldest namesake |
 
 See `tests/README.md` for the fake pi's controls and the known gaps.
 
 ## Configuration
 
-All knobs are env vars (set them in the unit files). Defaults are generic —
+All knobs are env vars (set them in a systemd drop-in, not the unit files —
+see *Post-install*). Defaults are generic —
 nothing personal is baked in.
 
 | Var | Default | Meaning |
@@ -315,16 +324,10 @@ nothing personal is baked in.
 | `AGENT_PROVIDER` / `AGENT_MODEL` | `deepseek` / `deepseek-v4-pro` | pi provider and model |
 | `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
 | `AGENT_TRASH_DAYS` | `30` | days a deleted transcript stays in `trash/` before the janitor purges it |
-| `AGENT_USAGE_CMD` | unset | command that prints the current provider's account balance as JSON (see *Usage* below) |
+| `AGENT_USAGE_CMD` | unset | command that prints the current provider's account balance as JSON (see *Usage line* above) |
 | `AGENT_USAGE_PROVIDER` | `AGENT_PROVIDER` | the provider `AGENT_USAGE_CMD` reports on; on any other provider no balance is shown |
 | `AGENT_USAGE_REFRESH` | `30` | seconds between transcript re-reads for the usage line |
 | `AGENT_USAGE_INTERVAL` | `900` | seconds between balance API calls |
-
-The dashboard also shows a **build badge** (top right): its own `UI_VERSION`
-and, from `GET /version`, the running daemon's `DAEMON_VERSION` and the commit
-`install.sh` recorded. The two numbers move **together** — they identify one
-deploy, not one file — so a mismatch really does mean the page and the daemon
-came from different installs. Tap the badge for the full string.
 | `AGENT_SESSION_ID` | `siri-agent` | session id = memory key; change to wipe |
 | `AGENT_SESSION_NAME` | `siri-agent` | display name for new sessions (the web UI can name them per-session) |
 | `AGENT_TASK_WAIT` | `15` | seconds Siri holds the SSH call open |
@@ -336,6 +339,14 @@ came from different installs. Tap the badge for the full string.
 | `AGENT_MATRIX_CONFIG` | `~/.config/web-agent/matrix` | dir with `token` / `homeserver_url` / `room_id` |
 | `AGENT_MATRIX_SENDERS` | *(empty)* | allowlist of Matrix senders; empty = anyone except the bot |
 | `AGENT_MATRIX_STATE_DIR` | `~/.local/state/agent-matrix-listener` | Matrix sync-token storage |
+| `AGENT_UI_TIMEOUT` / `AGENT_UI_NOUI_GRACE` | `90` / `15` | extension-question timeouts (see *Approval gate*) |
+| `AGENT_PI_BIN` | *(found)* | the pi binary; default: next to the daemon, then PATH, then `~/.local/bin` |
+
+The dashboard also shows a **build badge** (top right): its own `UI_VERSION`
+and, from `GET /version`, the running daemon's `DAEMON_VERSION` and the commit
+`install.sh` recorded. The two numbers move **together** — they identify one
+deploy, not one file — so a mismatch really does mean the page and the daemon
+came from different installs. Tap the badge for the full string.
 
 ## Security notes
 

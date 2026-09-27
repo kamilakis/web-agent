@@ -7,9 +7,6 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/agent-matrix-listener
-# See agent-session.service: a boot-time user unit gets systemd's default PATH,
-# which has no ~/.local/bin.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 RestartSec=5
 # Restrict who can trigger the agent from Matrix, e.g.:

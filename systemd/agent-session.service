@@ -10,13 +10,10 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/agent-session-daemon
-# ~/.local/bin holds pi and matrix-notify. A `systemctl --user` unit started at
-# boot (linger, before a login has imported the environment) gets systemd's
-# default PATH, which does NOT include it: on 2026-09-21 11:07:26 the daemon
-# died with `FileNotFoundError: 'pi'` and only came up because systemd retried
-# afterwards. The daemon also resolves helpers next to itself, but pinning PATH
-# here keeps every other tool (ffmpeg, and anything pi shells out to) working.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# PATH is NOT pinned here: that replaced the whole environment's PATH for pi
+# and every tool it runs. The daemon adds ~/.local/bin (and the system dirs)
+# itself at startup; extra dirs such as Go's go in
+# ~/.config/environment.d/*.conf, e.g. PATH=/usr/local/go/bin:$HOME/go/bin:${PATH}
 Restart=always
 RestartSec=5
 # Personal values go in a drop-in — agent-session.service.d/*.conf — NOT here:

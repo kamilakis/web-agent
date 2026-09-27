@@ -30,6 +30,10 @@ MODEL_INPUT = json.loads(os.environ.get("FAKE_PI_MODEL_INPUT", '["text", "image"
 MESSAGES = int(os.environ.get("FAKE_PI_MESSAGES", "4"))
 HANG_SECS = float(os.environ.get("FAKE_PI_HANG_SECS", "20"))
 
+if os.environ.get("FAKE_PI_PATHLOG"):
+    with open(os.environ["FAKE_PI_PATHLOG"], "a") as _f:
+        _f.write(os.environ.get("PATH", "") + "\n")
+
 if os.environ.get("FAKE_PI_ARGV"):
     with open(os.environ["FAKE_PI_ARGV"], "a") as _f:
         _f.write(" ".join(sys.argv[1:]) + "\n")
