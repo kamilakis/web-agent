@@ -130,7 +130,7 @@ UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-27.4"
+DAEMON_VERSION = "2026-09-27.5"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 

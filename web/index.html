@@ -270,6 +270,10 @@ main {
 .whole-copy:hover { color:var(--accent); background:var(--surface); }
 .whole-copy.done { color:var(--ok); }
 .whole-copy svg { width:13px; height:13px; display:block; }
+/* icon only: the tick replaces the copy icon briefly after a copy */
+.whole-copy .ico-done { display:none; }
+.whole-copy.done .ico-copy { display:none; }
+.whole-copy.done .ico-done { display:block; }
 .msg.assistant { align-items:stretch; }
 .bubble { white-space:pre-wrap; overflow-wrap:anywhere; }
 /* the person's turn is a bubble; Claude's turn is plain prose, as in the app */
@@ -533,7 +537,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.4';
+const UI_VERSION = '2026-09-27.5';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -619,7 +623,8 @@ function addWholeCopy(msg) {
   btn.type = 'button';
   btn.className = 'whole-copy';
   btn.title = 'Copy whole response';
-  btn.innerHTML = copyIcons() + '<span>Copy</span>';
+  btn.setAttribute('aria-label', 'Copy whole response');
+  btn.innerHTML = copyIcons();
   btn.onclick = async () => {
     const text = parts().join('\n\n')
       .replace(/```choose[^\n]*\n[\s\S]*?```/gi, '').trim();
@@ -632,11 +637,10 @@ function addWholeCopy(msg) {
     } catch {}
     if (!ok) ok = copyPlainText(text);
     btn.classList.toggle('done', ok);
-    const lbl = btn.querySelector('span');
-    if (lbl) lbl.textContent = ok ? 'Copied' : 'Copy failed';
+    btn.title = ok ? 'Copied' : 'Copy failed';
     if (ok) setTimeout(() => {
       btn.classList.remove('done');
-      if (lbl) lbl.textContent = 'Copy';
+      btn.title = 'Copy whole response';
     }, 1400);
   };
   msg.appendChild(btn);
