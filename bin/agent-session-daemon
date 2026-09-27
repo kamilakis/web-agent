@@ -23,6 +23,7 @@ import sys
 import json
 import time
 import queue
+import shlex
 import shutil
 import base64
 import signal
@@ -111,6 +112,10 @@ TRASH_DAYS = int(os.environ.get("AGENT_TRASH_DAYS", "30"))
 USAGE_REFRESH = int(os.environ.get("AGENT_USAGE_REFRESH", "30"))
 USAGE_INTERVAL = int(os.environ.get("AGENT_USAGE_INTERVAL", "900"))
 USAGE_CMD = os.environ.get("AGENT_USAGE_CMD", "")
+# AGENT_USAGE_CMD reports ONE provider's account. Without this it ran for every
+# provider, so after a model switch another provider's balance was shown under
+# the new model. Defaults to the daemon's own AGENT_PROVIDER.
+USAGE_PROVIDER = os.environ.get("AGENT_USAGE_PROVIDER") or PROVIDER
 
 # §21 approval gate: how long a question from an extension may wait for an
 # answer, and how long to wait for a dashboard to appear at all before giving
@@ -124,7 +129,7 @@ UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-27.1"
+DAEMON_VERSION = "2026-09-27.2"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -1470,13 +1475,14 @@ class Daemon:
     def usage_cmd(self, provider):
         """The command that reports `provider`'s account balance, if any.
 
-        Provider-agnostic by configuration: AGENT_USAGE_CMD wins, else an
+        Provider-agnostic by configuration: AGENT_USAGE_CMD for the provider
+        it reports on (AGENT_USAGE_PROVIDER, default AGENT_PROVIDER), else an
         installed `agent-usage-<provider>` or `<provider>-usage`. No command
         means no balance — the transcript totals stand on their own and nothing
         is invented for a provider that cannot be asked.
         """
-        if USAGE_CMD:
-            return USAGE_CMD.split()
+        if USAGE_CMD and provider == USAGE_PROVIDER:
+            return shlex.split(USAGE_CMD)
         for name in (f"agent-usage-{provider}", f"{provider}-usage"):
             hit = find_bin(name)
             if os.path.isfile(hit) and os.access(hit, os.X_OK):

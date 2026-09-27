@@ -7,6 +7,9 @@
 source "$(cd "$(dirname "$0")" && pwd)/harness.sh"
 harness_init "${TMPDIR:-/tmp}/wa-tests/usage" "${TEST_PORT:-8392}"
 export AGENT_USAGE_REFRESH=1     # recompute immediately rather than every 30s
+# The fake pi reports provider "fake"; AGENT_USAGE_CMD only runs for the
+# provider it is declared for. Set here, not inherited from the live drop-in.
+export AGENT_USAGE_PROVIDER=fake
 
 # A transcript as pi writes it: assistant messages carrying `usage`, with the
 # model named on each one. This is what makes the totals provider-agnostic.
@@ -79,6 +82,19 @@ ok "$(jget "$U" "['balance']['total']")" "5.90" "decimal string passed through"
 ok "$(jget "$U" "['balance']['currency']")" "USD" "with its currency"
 ok "$(jget "$U" "['balance']['spent']")" "12.34" "spend since the top-up"
 ok "$(jget "$U" "['balance']['cmd']")" "$ST/ok-usage" "and which helper answered"
+stop_daemon
+
+echo "=== AGENT_USAGE_CMD is one provider's balance, never another's"
+reset_state
+seed_usage_transcript live.jsonl 0.05 2
+helper "$ST/ok-usage" '{"currency":"USD","total":"5.90"}'
+FAKE_PI_SCENARIO=ok FAKE_PI_SESSION="$ST/sessions/live.jsonl" \
+  AGENT_USAGE_PROVIDER=deepseek AGENT_USAGE_CMD="$ST/ok-usage" start_daemon
+sleep 1.5
+U=$(api GET /usage)
+ok "$(jget "$U" "['provider']")" "fake" "the live provider is not the helper's"
+ok "$(jget "$U" "['balance']")" "" "so no balance is shown for it"
+ok "$(jget "$U" "['session']['cost']")" "0.1" "and the local totals still work"
 stop_daemon
 
 echo "=== AGENT_USAGE_CMD accepts arguments, and a failing helper is survivable"

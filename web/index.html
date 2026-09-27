@@ -151,6 +151,10 @@ body {
   font:13px/1.45 var(--sans); color:var(--text);
 }
 #uiDialog .uiTitle { white-space:pre-wrap; font-weight:600; margin-bottom:10px; }
+#uiDialog .uiMessage {
+  white-space:pre-wrap; overflow-wrap:anywhere; margin:-4px 0 10px;
+  color:var(--dim); font:12px/1.45 var(--mono);
+}
 #uiDialog .uiOpts { display:flex; flex-direction:column; gap:6px; }
 #uiDialog .uiExpires {
   margin-top:10px; color:var(--dim); font:500 10.5px/1 var(--mono); opacity:.8;
@@ -510,6 +514,7 @@ footer {
 <div id="uiScrim" hidden></div>
 <div id="uiDialog" hidden role="dialog" aria-modal="true">
   <div class="uiTitle" id="uiTitle"></div>
+  <div class="uiMessage" id="uiMessage" hidden></div>
   <div class="uiOpts" id="uiOpts"></div>
   <input class="uiText" id="uiText" type="text" hidden>
   <div class="uiExpires" id="uiExpires" hidden></div>
@@ -523,7 +528,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.1';
+const UI_VERSION = '2026-09-27.2';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -651,6 +656,7 @@ let uiReq = null;       // §21 the extension dialog on screen, if any
 const uiScrim = document.getElementById('uiScrim');
 const uiDialog = document.getElementById('uiDialog');
 const uiTitle = document.getElementById('uiTitle');
+const uiMessage = document.getElementById('uiMessage');
 const uiOpts = document.getElementById('uiOpts');
 const uiText = document.getElementById('uiText');
 const uiSend = document.getElementById('uiSend');
@@ -849,7 +855,7 @@ function renderUsage() {
 
   const bits = [];
   if (b.ok) {
-    bits.push(money(b.total, cur) + ' left');
+    bits.push(money(b.total, cur, b.exponent) + ' left');
     if (b.spent != null) bits.push('today ' + usd(t.cost));
   } else if (b.err) {
     bits.push('balance unavailable');
@@ -862,8 +868,8 @@ function renderUsage() {
   const full = [];
   full.push('model  ' + (u.model || '?') + (u.provider ? ' (' + u.provider + ')' : ''));
   if (b.ok) {
-    full.push('balance  ' + money(b.total, cur) + ' left' +
-              (b.topped_up != null ? '  (topped up ' + money(b.topped_up, cur) + ')' : ''));
+    full.push('balance  ' + money(b.total, cur, b.exponent) + ' left' +
+              (b.topped_up != null ? '  (topped up ' + money(b.topped_up, cur, b.exponent) + ')' : ''));
     if (b.spent != null) {
       full.push('spent  ' + usd(b.spent) + (b.topup_total != null ? ' of ' + usd(b.topup_total) : '') +
                 ' since the last top-up');
@@ -889,14 +895,27 @@ usageBar.onclick = () => sbMsg(usageBar.title.replace(/\n/g, ' \u00b7 '), 9000);
 // §21 The approval gate (and any other extension) asks through here. pi's
 // select options arrive as a list of strings, confirm as a yes/no, input and
 // editor as free text; the answer goes back with the same id.
+// Questions can overlap (parallel gated tool calls each ask), so they queue:
+// one on screen, the rest in uiQueue, shown in the order they were asked.
+let uiQueue = [];
+// A select's Cancel must not be a bare cancel: pi reports that to the extension
+// exactly like a timeout, so the approval gate would tell the agent "nobody
+// answered" when the user said no. If the options carry a deny, Cancel IS it.
+function uiDenyOption(req) {
+  if (req.method !== 'select') return null;
+  return (req.options || []).find(o => /^\s*(\d+[).]\s*)?deny\b/i.test(String(o))) || null;
+}
 function showUiDialog(req) {
   uiReq = req;
   uiTitle.textContent = req.title || 'The agent needs an answer';
+  uiMessage.textContent = req.message || '';
+  uiMessage.hidden = !req.message;
   uiOpts.textContent = '';
   const isText = req.method === 'input' || req.method === 'editor';
   uiText.hidden = !isText;
   uiSend.hidden = !isText;
-  uiCancel.textContent = isText ? 'Cancel' : 'Cancel (deny)';
+  uiCancel.textContent = req.method === 'confirm' ? 'Cancel (No)'
+                       : uiDenyOption(req) ? 'Cancel (deny)' : 'Cancel';
   if (isText) {
     uiText.value = req.prefill || '';
     uiText.placeholder = req.placeholder || '';
@@ -921,21 +940,47 @@ function hideUiDialog() {
   uiDialog.hidden = true;
   uiScrim.hidden = true;
 }
+// Take a question: show it, or queue it behind the one on screen.
+function enqueueUi(req) {
+  if (!req || req.id == null) return;
+  if ((uiReq && uiReq.id === req.id) || uiQueue.some(q => q.id === req.id)) return;
+  if (uiReq) { uiQueue.push(req); paintUiExpires(); }
+  else showUiDialog(req);
+}
+function showNextUi() {
+  hideUiDialog();
+  const next = uiQueue.shift();
+  if (next) showUiDialog(next);
+}
+// A question is closed (answered here, in another tab, or by the daemon).
+function dropUi(id) {
+  uiQueue = uiQueue.filter(q => q.id !== id);
+  if (uiReq && uiReq.id === id) { showNextUi(); return true; }
+  paintUiExpires();
+  return false;
+}
 // The daemon cancels an unanswered question (AGENT_UI_TIMEOUT, 90s by default),
 // so say how long is left rather than letting it vanish mid-tap.
 let uiTick = null;
+function paintUiExpires() {
+  const req = uiReq;
+  if (!req) return;
+  const bits = [];
+  if (req.deadline) {
+    const n = Math.max(0, Math.round(req.deadline - Date.now() / 1000));
+    bits.push(n > 0 ? 'expires in ' + n + 's' : 'expired');
+  }
+  if (uiQueue.length) {
+    bits.push(uiQueue.length + ' more question' + (uiQueue.length > 1 ? 's' : '') + ' waiting');
+  }
+  uiExpires.textContent = bits.join(' · ');
+  uiExpires.hidden = !bits.length;
+}
 function startUiCountdown(req) {
   clearInterval(uiTick);
   uiTick = null;
-  const left = () => Math.max(0, Math.round((req.deadline || 0) - Date.now() / 1000));
-  if (!req.deadline) { uiExpires.hidden = true; return; }
-  uiExpires.hidden = false;
-  const paint = () => {
-    const n = left();
-    uiExpires.textContent = n > 0 ? 'expires in ' + n + 's' : 'expired';
-  };
-  paint();
-  uiTick = setInterval(paint, 1000);
+  paintUiExpires();
+  if (req.deadline) uiTick = setInterval(paintUiExpires, 1000);
 }
 async function answerUi(option) {
   const req = uiReq;
@@ -947,7 +992,7 @@ async function answerUi(option) {
     payload = req.method === 'confirm' ? {confirmed: option === 'Yes'}
                                        : {value: option};
   }
-  hideUiDialog();
+  showNextUi();
   try {
     const r = await fetch('/ui_response', {
       method: 'POST',
@@ -959,16 +1004,29 @@ async function answerUi(option) {
     sbMsg('could not send that answer');
   }
 }
-uiCancel.onclick = () => answerUi(undefined);
+uiCancel.onclick = () => {
+  const req = uiReq;
+  if (!req) return;
+  if (req.method === 'confirm') return answerUi('No');
+  const deny = uiDenyOption(req);
+  return answerUi(deny != null ? deny : undefined);
+};
 uiSend.onclick = () => answerUi(uiText.value);
 uiText.onkeydown = (e) => { if (e.key === 'Enter') answerUi(uiText.value); };
+// Bring the dialogs in line with the daemon: on load, and on every SSE
+// reconnect — a question asked, or closed, while the stream was down never
+// reached this page as an event.
 async function loadPendingUi() {
   try {
     const r = await fetch('/ui', {headers: H});
     if (!r.ok) return;
     const data = await r.json();
-    const first = (data.pending || [])[0];
-    if (first && (!uiReq || uiReq.id !== first.id)) showUiDialog(first);
+    const pending = Array.isArray(data.pending) ? data.pending : [];
+    const ids = new Set(pending.map(q => q.id));
+    const shown = uiReq && ids.has(uiReq.id) ? uiReq : null;
+    uiQueue = pending.filter(q => !shown || q.id !== shown.id);
+    if (shown) paintUiExpires();
+    else showNextUi();
   } catch {}
 }
 
@@ -1564,14 +1622,11 @@ function onEvent(e) {
   try { ev = JSON.parse(e.data); } catch { return; }
   const t = ev.type;
   if (t === 'ui_request') {      // §21 must reach the user even while viewing
-    showUiDialog(ev);
+    enqueueUi(ev);
     return;
   }
   if (t === 'ui_resolved') {
-    if (uiReq && uiReq.id === ev.id) {
-      hideUiDialog();
-      if (ev.why) sbMsg(ev.method + ': ' + ev.why);
-    }
+    if (dropUi(ev.id) && ev.why) sbMsg(ev.method + ': ' + ev.why);
     return;
   }
   if (t === 'session_deleted') {
@@ -1690,6 +1745,7 @@ function connectSSE() {
   es = new EventSource(eventsUrl);
   es.onmessage = onEvent;
   es.onopen = async () => {
+    if (!firstOpen) loadPendingUi();   // §21 events missed while disconnected
     if (!firstOpen && !working && !viewing) {
       try { const msgs = await fetch('/messages', {headers:H}).then(r=>r.json()); renderSnapshot(msgs.messages || []); } catch {}
     }
