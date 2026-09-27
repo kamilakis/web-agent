@@ -606,6 +606,23 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(!/"onmouseover=/.test(html) && html.includes('&quot;'),
      'a quote in a link URL is escaped (got ' + html + ')');
 
+  console.log('=== Archive lives in the header, beside the session name');
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'web', 'index.html'), 'utf8');
+  const sbHead = src.slice(src.indexOf('<div class="sb-head">'), src.indexOf('id="sessList"'));
+  const row = src.slice(src.indexOf('<div class="session-row">'), src.indexOf('<div class="spacer">'));
+  ok(!/Archive/.test(sbHead), 'the sidebar no longer carries an Archive button next to "+ New session"');
+  ok(/id="archiveBtn"/.test(row) && row.indexOf('archiveBtn') > row.indexOf('renameBtn'),
+     'it sits in the header after the rename pencil');
+  const AR = newTab();
+  Object.assign(AR.routes, BASE_ROUTES(stateD));
+  AR.routes['POST /archive'] = {json: {ok: true, archived: '/s/archive/x.jsonl'}};
+  await tick();
+  await AR.byId['archiveBtn'].onclick();
+  await tick();
+  ok(/Archive this session/.test(AR.confirms[0] || ''), 'it still asks first');
+  ok(AR.posts.some(p => p.path === '/archive'), 'and archives through POST /archive');
+  ok(!AR.posts.some(p => p.path === '/newsession'), 'not through /newsession');
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');

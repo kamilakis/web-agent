@@ -35,8 +35,9 @@ across surfaces.
   - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
   - model switcher, status dot, reconnect with snapshot re-render
   - **session history sidebar** — list, view, archive and create sessions;
-    new sessions can be named at creation, and clicking the session name in
-    the header renames the live one
+    new sessions can be named at creation; beside the session name in the
+    header, the pencil renames the live one and the archive icon archives it
+    (and starts a fresh one)
   - **resume** a past session from its banner ("▶ Resume"): it becomes the
     live session for web, Siri and Matrix, and an archived one moves back out
     of Archived. Any run it interrupts is answered rather than dropped
