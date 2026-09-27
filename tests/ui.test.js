@@ -31,7 +31,9 @@ class Elem {
     this.classList = {
       add: c => { if (!this.classList.contains(c)) this.className = (this.className + ' ' + c).trim(); },
       remove: c => { this.className = this.className.split(/\s+/).filter(x => x !== c && x).join(' '); },
-      toggle: c => this.classList.contains(c) ? this.classList.remove(c) : this.classList.add(c),
+      // the optional second argument forces the state, as in a browser
+      toggle: (c, force) => ((force === undefined ? !this.classList.contains(c) : force)
+                             ? this.classList.add(c) : this.classList.remove(c)),
       contains: c => this.className.split(/\s+/).includes(c),
     };
   }
@@ -622,6 +624,94 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(/Archive this session/.test(AR.confirms[0] || ''), 'it still asks first');
   ok(AR.posts.some(p => p.path === '/archive'), 'and archives through POST /archive');
   ok(!AR.posts.some(p => p.path === '/newsession'), 'not through /newsession');
+
+  console.log('=== §22 an update is offered, and Update starts it');
+  const UPD = {available: true, can_update: true, behind: 2, latest: 'bbb2222',
+               installed: 'aaa1111', commits: [{sha: 'bbb2222', subject: 'smaller text'},
+                                               {sha: 'abc1234', subject: 'move archive'}],
+               run: null};
+  const UA = newTab();
+  Object.assign(UA.routes, BASE_ROUTES(stateD));
+  UA.routes['/version'] = {json: {daemon: 'x', commit: 'aaa1111'}};
+  UA.routes['GET /update'] = {json: UPD};
+  UA.routes['POST /update'] = {json: {ok: true, to: 'bbb2222'}};
+  await tick(); await tick(); await tick();
+  ok(UA.byId['updateBar'].hidden === false, 'the update bar is shown');
+  ok(/Update available · 2 commits · smaller text/.test(UA.byId['updateText'].textContent),
+     'with the count and the newest subject (got ' + UA.byId['updateText'].textContent + ')');
+  ok(UA.byId['updateGo'].hidden === false, 'and an Update button');
+  await UA.byId['updateGo'].onclick();
+  await tick();
+  ok(/smaller text/.test(UA.confirms.pop() || ''), 'Update asks first, listing the commits');
+  const up = UA.posts.find(p => p.path === '/update');
+  ok(up && up.body.force === true, 'then POSTs /update');
+
+  console.log('=== §22 an update the checkout would refuse is explained, not offered');
+  const UB = newTab();
+  Object.assign(UB.routes, BASE_ROUTES(stateD));
+  UB.routes['GET /update'] = {json: {...UPD, can_update: false,
+                                     blocked: 'the checkout has uncommitted changes'}};
+  await tick(); await tick(); await tick();
+  ok(/but the checkout has uncommitted changes/.test(UB.byId['updateText'].textContent),
+     'says why it cannot update');
+  ok(UB.byId['updateGo'].hidden === true, 'and has no Update button');
+
+  console.log('=== §22 progress, and a failed update');
+  const UC = newTab();
+  Object.assign(UC.routes, BASE_ROUTES(stateD));
+  const nowS = Date.now() / 1000;
+  UC.routes['GET /update'] = {json: {...UPD, run: {state: 'running', stage: 'test',
+    to: 'bbb2222', message: 'running the tests at bbb2222', updated: nowS}}};
+  await tick(); await tick(); await tick();
+  ok(/Updating to bbb2222: running the tests/.test(UC.byId['updateText'].textContent),
+     'shows what the updater is doing');
+  ok(UC.byId['updateGo'].hidden === true, 'with no buttons to press meanwhile');
+  UC.routes['GET /update'] = {json: {...UPD, run: {state: 'failed', stage: 'test',
+    message: 'tests failed at bbb2222', finished: nowS}}};
+  await UC.ctx.loadUpdate();
+  ok(/Update failed: tests failed/.test(UC.byId['updateText'].textContent) &&
+     UC.byId['updateBar'].classList.contains('bad'), 'a failure is shown as one');
+
+  console.log('=== §22 a new build after a reconnect reloads the page');
+  const UD = newTab();
+  Object.assign(UD.routes, BASE_ROUTES(stateD));
+  UD.routes['/version'] = {json: {daemon: 'x', commit: 'aaa1111'}};
+  UD.routes['GET /update'] = {json: {available: false, run: null}};
+  let reloads = 0;
+  UD.ctx.location.reload = () => { reloads++; };
+  await tick(); await tick(); await tick();
+  const esD = vm.runInContext('es', UD.ctx);
+  await esD.onopen();                       // the first open
+  UD.routes['/version'] = {json: {daemon: 'y', commit: 'bbb2222'}};
+  await esD.onopen(); await tick(); await tick();
+  ok(reloads === 1, 'reloaded once the daemon serves a different commit');
+
+  const UE = newTab();
+  Object.assign(UE.routes, BASE_ROUTES(stateD));
+  UE.routes['/version'] = {json: {daemon: 'x', commit: 'aaa1111'}};
+  UE.routes['GET /update'] = {json: {available: false, run: null}};
+  let reloadsE = 0;
+  UE.ctx.location.reload = () => { reloadsE++; };
+  await tick(); await tick(); await tick();
+  const esE = vm.runInContext('es', UE.ctx);
+  await esE.onopen();
+  UE.byId['input'].value = 'a half-written message';
+  UE.routes['/version'] = {json: {daemon: 'y', commit: 'bbb2222'}};
+  await esE.onopen(); await tick(); await tick();
+  ok(reloadsE === 0, 'but not over a half-written message');
+  ok(/A new version is installed/.test(UE.byId['updateText'].textContent),
+     'it offers a Reload instead');
+
+  console.log('=== §22 after the reload: say what happened, once');
+  const UF = newTab();
+  Object.assign(UF.routes, BASE_ROUTES(stateD));
+  UF.routes['/version'] = {json: {daemon: 'y', commit: 'bbb2222'}};
+  UF.routes['GET /update'] = {json: {available: false, run: {state: 'ok', from: 'aaa1111',
+    to: 'bbb2222', finished: Date.now() / 1000 - 5}}};
+  await tick(); await tick(); await tick(); await tick();
+  ok(/Updated to bbb2222 \(from aaa1111\)/.test(UF.byId['sbNote'].textContent),
+     'announces the update (got ' + UF.byId['sbNote'].textContent + ')');
+  ok(UF.byId['updateBar'].hidden === true, 'and there is nothing left to offer');
 
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }

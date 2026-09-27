@@ -22,6 +22,11 @@ ok "$?" "0" "runs from outside the checkout"
 ok "$(test -x "$ST/home/.local/bin/agent-session-daemon" && echo yes)" "yes" "installed the daemon"
 has "$(cat "$ST/systemctl.log")" "--user restart agent-session.service" "restarted it"
 has "$(cat "$ST/home/.local/share/agent-session/build.json")" '"commit"' "recorded the build"
+has "$(cat "$ST/home/.local/share/agent-session/build.json")" "\"repo\":\"$REPO\"" \
+    "and the checkout the Update button pulls from"
+ok "$(test -x "$ST/home/.local/bin/agent-update" && echo yes)" "yes" "installed the updater"
+ok "$(test -f "$ST/home/.config/systemd/user/agent-update.service" && echo yes)" "yes" "and its unit"
+hasnt "$(grep enable "$ST/systemctl.log")" "agent-update" "which is started on demand, never enabled"
 
 echo "=== NO_RESTART=1 leaves the running daemon alone and says so"
 reset_state

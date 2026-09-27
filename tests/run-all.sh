@@ -29,6 +29,8 @@ run bash ui-relay.test.sh
 run bash errors.test.sh
 run bash hardening.test.sh
 run bash install.test.sh
+run bash update.test.sh
+run bash agent-update.test.sh
 run bash resume.test.sh
 
 echo

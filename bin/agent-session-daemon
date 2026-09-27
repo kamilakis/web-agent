@@ -126,11 +126,22 @@ USAGE_PROVIDER = os.environ.get("AGENT_USAGE_PROVIDER") or PROVIDER
 UI_TIMEOUT = int(os.environ.get("AGENT_UI_TIMEOUT", "90"))
 UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 
+# Self-update (§22). The daemon checks the git checkout install.sh recorded for
+# new commits on AGENT_UPDATE_BRANCH and tells the dashboard; the Update button
+# starts agent-update.service, a unit of its own (see bin/agent-update). 0
+# disables the periodic check; the dashboard can still ask for one.
+UPDATE_CHECK = int(os.environ.get("AGENT_UPDATE_CHECK", "900"))
+UPDATE_BRANCH = os.environ.get("AGENT_UPDATE_BRANCH", "master")
+UPDATE_CMD = os.environ.get(
+    "AGENT_UPDATE_CMD", "systemctl --user start --no-block agent-update.service")
+UPDATE_FILE = os.path.join(STATE, "update.json")    # the updater's progress
+HEALTH_FILE = os.path.join(STATE, "health.json")    # "this build is up"
+
 # What this build is. Bump DAEMON_VERSION with every daemon change: the
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-27.6"
+DAEMON_VERSION = "2026-09-27.7"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -386,16 +397,44 @@ def build_info():
     """This daemon's version, plus the commit install.sh recorded in
     $AGENT_SESSION_DIR/build.json. A missing build file is not an error —
     a hand-copied daemon just reports its version alone."""
-    info = {"daemon": DAEMON_VERSION, "commit": None, "built": None}
+    info = {"daemon": DAEMON_VERSION, "commit": None, "built": None, "repo": None}
     try:
         with open(BUILD_FILE, encoding="utf-8") as f:
             d = json.load(f)
         if isinstance(d, dict):
             info["commit"] = d.get("commit") or None
             info["built"] = d.get("built") or None
+            info["repo"] = d.get("repo") or None
     except (OSError, ValueError):
         pass
     return info
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def _git(repo, *args, timeout=30):
+    """Run git in the checkout; (ok, stdout). Never prompts for credentials."""
+    try:
+        r = subprocess.run(["git", "-C", repo, *args], capture_output=True,
+                           text=True, timeout=timeout,
+                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stdout if r.returncode == 0 else r.stderr).strip()
 
 
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -503,6 +542,7 @@ class Daemon:
         self.usage = None               # §20 usage/balance snapshot for /usage
         self.ui_pending = {}            # §21 extension dialogs awaiting an answer
         self.ui_pi_closes = set()       # ...of those, ones pi times out itself
+        self.update_info = None         # §22 last update check
         self.current_out_dir = None     # §15: this turn's out dir, scanned at settle
         self.req_seq = 0
         self.stdin_lock = threading.Lock()          # serialize writes to pi stdin
@@ -601,12 +641,16 @@ class Daemon:
         """Ask pi which file it really opened and remember it, so the next start
         resumes that transcript. pi answers get_state only once it is up, and
         read_events() is already draining stdout by then."""
+        healthy = False
         for _ in range(30):
             try:
                 st = self.send_cmd_with_response({"type": "get_state"}, timeout=10)
             except TimeoutError:
                 time.sleep(1)
                 continue
+            if not healthy:
+                healthy = True
+                self.write_health()
             f = (st.get("data") or {}).get("sessionFile")
             if f and _valid_session_file(f):
                 self.record_active_session(f)
@@ -1756,11 +1800,137 @@ class Daemon:
                 log("could not purge", p, e)
         return purged
 
+    # ---- self-update (§22) ----------------------------------------------
+    def write_health(self):
+        """Say that THIS build is up and pi answers: agent-update waits for
+        this, with the new commit, before it calls an update good (and rolls
+        back if it never comes)."""
+        b = build_info()
+        try:
+            _write_json(HEALTH_FILE, {"daemon": DAEMON_VERSION,
+                                      "commit": b.get("commit"),
+                                      "pid": os.getpid(), "at": time.time()})
+        except OSError as e:
+            log("could not write health.json:", e)
+
+    def repo_dir(self):
+        d = os.environ.get("AGENT_REPO_DIR") or build_info().get("repo")
+        return d if d and os.path.isdir(os.path.join(d, ".git")) else None
+
+    def check_update(self, fetch=True):
+        """Compare what is installed with origin/UPDATE_BRANCH. Also says
+        whether the Update button can work (clean checkout on the branch) and
+        why not, so the page never offers a button that will be refused."""
+        repo = self.repo_dir()
+        snap = {"checked": time.time(), "branch": UPDATE_BRANCH, "repo": repo,
+                "available": False, "behind": 0, "commits": [],
+                "installed": None, "latest": None, "can_update": False,
+                "blocked": None, "error": None}
+        if not repo:
+            snap["error"] = "no git checkout recorded (run ./install.sh from one)"
+            return self._set_update(snap)
+        if fetch:
+            ok, out = _git(repo, "fetch", "--quiet", "origin", UPDATE_BRANCH,
+                           timeout=90)
+            if not ok:
+                snap["error"] = "git fetch failed: " + out[:160]
+                return self._set_update(snap)
+        ok, latest = _git(repo, "rev-parse", "--short", f"origin/{UPDATE_BRANCH}")
+        if not ok:
+            snap["error"] = f"no origin/{UPDATE_BRANCH} in the checkout"
+            return self._set_update(snap)
+        snap["latest"] = latest
+        inst = (build_info().get("commit") or "").split("-")[0]
+        ok, _ = _git(repo, "rev-parse", "--quiet", "--verify", f"{inst}^{{commit}}") \
+            if inst and inst != "unknown" else (False, "")
+        base = inst if ok else "HEAD"
+        snap["installed"] = inst or None
+        ok, out = _git(repo, "log", "--format=%h%x09%s", "--max-count=20",
+                       f"{base}..origin/{UPDATE_BRANCH}")
+        commits = [dict(zip(("sha", "subject"), l.split("\t", 1)))
+                   for l in out.splitlines() if "\t" in l] if ok else []
+        ok, n = _git(repo, "rev-list", "--count", f"{base}..origin/{UPDATE_BRANCH}")
+        snap["behind"] = int(n) if ok and n.isdigit() else len(commits)
+        snap["commits"] = commits
+        snap["available"] = snap["behind"] > 0
+        # Mirror agent-update's own refusals, so the button is honest.
+        ok, cur = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+        ok2, dirty = _git(repo, "status", "--porcelain")
+        ok3, _ = _git(repo, "merge-base", "--is-ancestor", "HEAD",
+                      f"origin/{UPDATE_BRANCH}")
+        if not ok or cur != UPDATE_BRANCH:
+            snap["blocked"] = f"the checkout is on '{cur or 'a detached HEAD'}', not '{UPDATE_BRANCH}'"
+        elif not ok2 or dirty:
+            snap["blocked"] = "the checkout has uncommitted changes"
+        elif not ok3:
+            snap["blocked"] = f"origin/{UPDATE_BRANCH} has diverged from the checkout"
+        snap["can_update"] = snap["available"] and not snap["blocked"]
+        return self._set_update(snap)
+
+    def _set_update(self, snap):
+        with self.lock:
+            prev = self.update_info
+            self.update_info = snap
+        if snap.get("available") and (not prev or prev.get("latest") != snap.get("latest")
+                                      or not prev.get("available")):
+            log("update available:", snap.get("installed"), "->", snap.get("latest"),
+                f"({snap.get('behind')} commits)")
+            self.broadcast({"type": "update_available", **self.update_state()})
+        return snap
+
+    def update_state(self):
+        """GET /update: the last check, plus the updater's own progress."""
+        with self.lock:
+            snap = dict(self.update_info or {})
+        snap["run"] = _read_json(UPDATE_FILE)
+        return snap
+
+    def update_loop(self):
+        time.sleep(min(30, UPDATE_CHECK) if UPDATE_CHECK > 0 else 0)
+        while UPDATE_CHECK > 0:
+            try:
+                self.check_update()
+            except Exception as e:
+                log("update check failed:", repr(e))
+            time.sleep(UPDATE_CHECK)
+
+    def start_update(self, force=False):
+        """The Update button. Refuses what agent-update would refuse, and a
+        run in flight unless forced (the restart would stop it)."""
+        run = _read_json(UPDATE_FILE) or {}
+        if run.get("state") == "running" and time.time() - run.get("updated", 0) < 1800:
+            return {"error": "an update is already running", "status": 409}
+        snap = self.check_update(fetch=False)
+        if snap.get("error"):
+            return {"error": snap["error"], "status": 409}
+        if snap.get("blocked"):
+            return {"error": snap["blocked"], "status": 409}
+        if not snap.get("available"):
+            return {"error": "already up to date", "status": 409}
+        with self.lock:
+            busy = self.busy or self.dispatch_pending or bool(self.ui_pending)
+        if busy and not force:
+            return {"error": "the agent is busy — the update restarts it, which "
+                             "would stop the reply", "busy": True, "status": 409}
+        try:
+            r = subprocess.run(shlex.split(UPDATE_CMD), capture_output=True,
+                               text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"error": f"could not start the updater: {e}", "status": 500}
+        if r.returncode != 0:
+            return {"error": "could not start the updater: "
+                             + (r.stderr or r.stdout).strip()[:200], "status": 500}
+        log("UPDATE STARTED:", snap.get("installed"), "->", snap.get("latest"))
+        self.broadcast({"type": "update_started", "to": snap.get("latest")})
+        return {"ok": True, "from": snap.get("installed"), "to": snap.get("latest"),
+                "status": 202}
+
     def run(self):
         self.start_pi()
         threading.Thread(target=self.read_fifo, daemon=True).start()
         threading.Thread(target=self.janitor, daemon=True).start()
         threading.Thread(target=self.usage_loop, daemon=True).start()
+        threading.Thread(target=self.update_loop, daemon=True).start()
         self.start_web()
         threading.Thread(target=self._track_active_session, daemon=True).start()
         self.read_events()   # blocks until pi dies
@@ -1949,6 +2119,8 @@ class Handler(BaseHTTPRequestHandler):
             self._command({"type": "get_state"})
         elif path == "/version":
             self._json(build_info())
+        elif path == "/update":
+            self._json(Handler.d.update_state())
         elif path == "/usage":
             with self.d.lock:
                 snap = self.d.usage
@@ -2105,6 +2277,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._json({"error": "no such request, or already answered"}, 409)
+        elif path == "/update/check":
+            try:
+                Handler.d.check_update()
+            except Exception as e:
+                log("update check error:", e)
+            self._json(Handler.d.update_state())
+        elif path == "/update":
+            res = Handler.d.start_update(force=bool(body.get("force")))
+            self._json(res, res.pop("status", 200))
         elif path == "/sessionname":
             name = (body.get("name") or "").strip()[:80]
             if not name:
