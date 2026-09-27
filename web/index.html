@@ -454,7 +454,6 @@ footer {
     <div class="sb-title">Sessions</div>
     <div class="sb-actions">
       <button id="sbNew" class="sb-btn" type="button" title="Start a fresh session (this one stays in the list)">+ New session</button>
-      <button id="sbArchive" class="sb-btn" type="button" title="Archive the running session and start a fresh one">Archive</button>
     </div>
     <div id="sbNote" class="sb-note" hidden></div>
   </div>
@@ -476,6 +475,12 @@ footer {
       <div class="session" id="sessionName"></div>
       <button class="rename" id="renameBtn" title="rename this session" aria-label="rename this session">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+      </button>
+      <!-- Archive acts on the live session, so it sits with that session's name
+           and rename pencil — not in the sidebar beside "+ New session", which
+           looked like its twin but leaves the current session alone. -->
+      <button class="rename" id="archiveBtn" type="button" title="Archive this session and start a fresh one" aria-label="Archive this session and start a fresh one">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><rect x="1" y="3" width="22" height="5" rx="1"/><path d="M10 12h4"/></svg>
       </button>
     </div>
   </div>
@@ -528,7 +533,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.3';
+const UI_VERSION = '2026-09-27.4';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -640,7 +645,7 @@ function addWholeCopy(msg) {
 // ---- sessions sidebar ----
 const sessList = document.getElementById('sessList');
 const sbNew = document.getElementById('sbNew');
-const sbArchive = document.getElementById('sbArchive');
+const archiveBtn = document.getElementById('archiveBtn');
 const sbNote = document.getElementById('sbNote');
 const sbToggle = document.getElementById('sbToggle');
 const sbScrim = document.getElementById('sbScrim');
@@ -1144,19 +1149,19 @@ async function doSwitch(kind) {
   const ans = prompt('Name the new session\n(blank = the default "' + (sessionName.textContent || 'siri-agent') + '"):', '');
   if (ans === null) return;   // cancelled
   const name = ans.trim().slice(0, 80);
-  sbNew.disabled = sbArchive.disabled = true;
+  sbNew.disabled = archiveBtn.disabled = true;
   try {
     const res = await fetch('/' + kind, {method: 'POST', headers: H,
       body: JSON.stringify(name ? {name} : {})}).then(r => r.json());
     if (res.error) sbMsg(res.error);
   } catch { sbMsg('switch failed — is the daemon up to date?'); }
-  sbNew.disabled = sbArchive.disabled = false;
+  sbNew.disabled = archiveBtn.disabled = false;
   await loadSessions();
   refreshHeader();
   if (!viewing) refreshLive();
 }
 sbNew.onclick = () => doSwitch('newsession');
-sbArchive.onclick = () => doSwitch('archive');
+archiveBtn.onclick = () => doSwitch('archive');
 // pencil next to the session name renames the live session
 renameBtn.onclick = async () => {
   const cur = (sessionName.textContent || '').trim();
