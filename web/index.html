@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#1f1e1d" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -445,7 +445,10 @@ footer {
 #input {
   flex:1 1 auto; min-width:0;
   background:none; border:0; outline:none; color:var(--text);
-  font:16px/1.35 var(--sans); padding:9px 0;
+  /* 14px to match the conversation. Under 16px iOS Safari zooms the page on
+     focus; maximum-scale=1 in the viewport meta stops that (pinch-zoom by
+     hand still works on iOS). */
+  font:14px/1.35 var(--sans); padding:9px 0;
 }
 #input::placeholder { color:var(--dim); }
 .iconBtn {
@@ -567,7 +570,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.9';
+const UI_VERSION = '2026-09-27.10';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
