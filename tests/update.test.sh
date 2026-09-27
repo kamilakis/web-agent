@@ -76,6 +76,8 @@ has "$R" '"ok": true' "accepted"
 ok "$(calls)" "1" "the updater was started once"
 has "$(cat "$ST/sse")" '"update_started"' "update_started broadcast"
 has "$(cat "$ST/out")" "UPDATE STARTED" "logged"
+ok "$(jget "$(api GET /update)" "['run']['state']")" "running" \
+   "update.json says running at once, before the updater writes anything"
 
 echo "=== a run in progress: asked first, unless forced"
 echo '{"state":"ok","stage":"done","finished":1}' >"$ST/update.json"
