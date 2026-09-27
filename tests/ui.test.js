@@ -709,9 +709,34 @@ console.log('=== snapshot reload: errored assistant message is visible');
   UF.routes['GET /update'] = {json: {available: false, run: {state: 'ok', from: 'aaa1111',
     to: 'bbb2222', finished: Date.now() / 1000 - 5}}};
   await tick(); await tick(); await tick(); await tick();
-  ok(/Updated to bbb2222 \(from aaa1111\)/.test(UF.byId['sbNote'].textContent),
-     'announces the update (got ' + UF.byId['sbNote'].textContent + ')');
-  ok(UF.byId['updateBar'].hidden === true, 'and there is nothing left to offer');
+  ok(UF.byId['updateBar'].hidden === false &&
+     /Updated to bbb2222 \(from aaa1111\)/.test(UF.byId['updateText'].textContent),
+     'announces the update in the bar, visible on a phone (got ' +
+     UF.byId['updateText'].textContent + ')');
+  ok(!UF.byId['updateBar'].classList.contains('bad'), 'as good news');
+  await UF.byId['updateLater'].onclick();
+  ok(UF.byId['updateBar'].hidden === true, 'OK clears it, and there is nothing left to offer');
+
+  console.log('=== §22 Update shows progress at once, even before the updater writes any');
+  const UG = newTab();
+  Object.assign(UG.routes, BASE_ROUTES(stateD));
+  UG.routes['/version'] = {json: {daemon: 'x', commit: 'aaa1111'}};
+  UG.routes['GET /update'] = {json: {...UPD, run: null}};   // the race: nothing written yet
+  UG.routes['POST /update'] = {json: {ok: true, to: 'bbb2222'}};
+  await tick(); await tick(); await tick();
+  await UG.byId['updateGo'].onclick();
+  await tick(); await tick();
+  ok(/Updating to bbb2222/.test(UG.byId['updateText'].textContent),
+     'the bar says it is updating (got ' + UG.byId['updateText'].textContent + ')');
+  ok(UG.byId['updateGo'].hidden === true, 'and does not offer the button again');
+  ok(vm.runInContext('updatePoll', UG.ctx) != null, 'and follows the progress');
+  UG.routes['GET /update'] = {json: {...UPD, run: {state: 'running', stage: 'test',
+    to: 'bbb2222', message: 'running the tests at bbb2222',
+    started: Date.now() / 1000, updated: Date.now() / 1000}}};
+  await UG.ctx.loadUpdate();
+  ok(/running the tests/.test(UG.byId['updateText'].textContent),
+     "then shows the updater's own stages");
+  vm.runInContext('clearInterval(updatePoll)', UG.ctx);
 
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }

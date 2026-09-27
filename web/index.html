@@ -567,7 +567,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.8';
+const UI_VERSION = '2026-09-27.9';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -867,13 +867,22 @@ let updateInfo = null;
 let updatePoll = null;
 let pageCommit;          // the build this page was served by (first /version)
 let reloadPending = false;
+let announced = null;    // the update this reload came from, until OK
 const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 
 async function loadUpdate() {
   try {
     const r = await fetch('/update', {headers: H});
-    updateInfo = r.ok ? await r.json() : null;
+    let next = r.ok ? await r.json() : null;
+    const mine = updateInfo && updateInfo.run;
+    const theirs = next && next.run;
+    // Our own just-pressed "running" wins over an answer that predates it.
+    if (next && mine && mine.state === 'running' &&
+        (!theirs || (theirs.started || 0) < (mine.started || 0) - 5)) {
+      next = {...next, run: mine};
+    }
+    updateInfo = next;
   } catch { /* a restart in progress: keep the last state */ }
   renderUpdate();
 }
@@ -899,6 +908,12 @@ function renderUpdate() {
     return;
   }
   updateLater.onclick = dismissUpdate;
+  if (announced) {
+    // In the bar, not sbMsg: the sidebar's note line is off-screen on a phone.
+    showUpdateBar('Updated to ' + announced.to +
+                  (announced.from ? ' (from ' + announced.from + ')' : ''), {later: 'OK'});
+    return;
+  }
   if (running) {
     showUpdateBar('Updating' + (run.to ? ' to ' + run.to : '') + ': ' + (run.message || '…'),
                   {later: ''});
@@ -926,6 +941,12 @@ function renderUpdate() {
   updateBar.hidden = true;
 }
 function dismissUpdate() {
+  if (announced) {
+    lsSet('wa-update-seen', String(announced.finished));
+    announced = null;
+    renderUpdate();
+    return;
+  }
   const u = updateInfo || {};
   const run = u.run || {};
   if (run.finished && run.state !== 'ok') lsSet('wa-update-seen', String(run.finished));
@@ -948,6 +969,13 @@ updateGo.onclick = async () => {
     const res = await r.json().catch(() => ({}));
     if (res.error) { sbMsg(res.error); updateGo.disabled = false; return; }
   } catch { sbMsg('could not start the update'); updateGo.disabled = false; return; }
+  // Show it running NOW, whatever the next /update read says: the updater
+  // starts in the background, and the page must not fall back to offering the
+  // button it has just pressed.
+  const now = Date.now() / 1000;
+  updateInfo = {...u, run: {state: 'running', stage: 'starting', to: u.latest,
+                            message: 'starting the updater', started: now, updated: now}};
+  renderUpdate();
   await loadUpdate();
 };
 // After a reconnect: is a different build serving us now? Then reload, unless
@@ -971,8 +999,8 @@ function announceUpdate() {
   if (run.state !== 'ok' || !run.to || !cur.startsWith(run.to)) return;
   if (Date.now() / 1000 - (run.finished || 0) > 600) return;
   if (lsGet('wa-update-seen') === String(run.finished)) return;
-  lsSet('wa-update-seen', String(run.finished));
-  sbMsg('Updated to ' + run.to + (run.from ? ' (from ' + run.from + ')' : ''), 8000);
+  announced = run;
+  renderUpdate();
 }
 
 // §20 The usage line. The cost comes from pi's own `usage` blocks in the

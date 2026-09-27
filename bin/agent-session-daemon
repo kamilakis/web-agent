@@ -141,7 +141,7 @@ HEALTH_FILE = os.path.join(STATE, "health.json")    # "this build is up"
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-27.8"
+DAEMON_VERSION = "2026-09-27.9"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -1912,14 +1912,37 @@ class Daemon:
         if busy and not force:
             return {"error": "the agent is busy — the update restarts it, which "
                              "would stop the reply", "busy": True, "status": 409}
+        # Say "running" BEFORE the unit starts. The updater writes its own
+        # progress only once it is up, and a page that re-read /update in that
+        # gap saw "update available" again — the Update button looked dead
+        # until it was pressed a second time.
+        now = int(time.time())
+        started = {"state": "running", "stage": "starting",
+                   "message": "starting the updater",
+                   "from": snap.get("installed"), "to": snap.get("latest"),
+                   "started": now, "updated": now}
+        try:
+            _write_json(UPDATE_FILE, started)
+        except OSError as e:
+            log("could not write update.json:", e)
+
+        def failed(why):
+            try:
+                _write_json(UPDATE_FILE, {**started, "state": "failed",
+                                          "stage": "starting", "message": why,
+                                          "finished": int(time.time())})
+            except OSError:
+                pass
+            return {"error": why, "status": 500}
+
         try:
             r = subprocess.run(shlex.split(UPDATE_CMD), capture_output=True,
                                text=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired) as e:
-            return {"error": f"could not start the updater: {e}", "status": 500}
+            return failed(f"could not start the updater: {e}")
         if r.returncode != 0:
-            return {"error": "could not start the updater: "
-                             + (r.stderr or r.stdout).strip()[:200], "status": 500}
+            return failed("could not start the updater: "
+                          + (r.stderr or r.stdout).strip()[:200])
         log("UPDATE STARTED:", snap.get("installed"), "->", snap.get("latest"))
         self.broadcast({"type": "update_started", "to": snap.get("latest")})
         return {"ok": True, "from": snap.get("installed"), "to": snap.get("latest"),
