@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Part C: deleting a session (§9, D1-D6 + D8).
+# Part C: deleting a session (§9, D1-D6, D8, D9).
 #
 #     bash tests/delete.test.sh
 #
@@ -80,6 +80,17 @@ sleep 2.5      # a couple of janitor ticks
 ok "$(test -f "$ST/trash/stale-2.jsonl" && echo yes || echo no)" "no" "a 31-day-old transcript is purged"
 ok "$(test -f "$ST/trash/recent-1.jsonl" && echo yes || echo no)" "yes" "a 29-day-old one is kept"
 has "$(cat "$ST/out")" "TRASH PURGED" "logged the purge"
+stop_daemon
+
+echo "=== D9: an OLD transcript survives its delete (the rename keeps its mtime)"
+reset_state
+seed_session sessions ancient.jsonl
+touch -d "45 days ago" "$ST/sessions/ancient.jsonl"
+FAKE_PI_SCENARIO=ok start_daemon
+api POST /deletesession '{"file":"ancient.jsonl","dir":"sessions"}' >/dev/null
+sleep 2.5      # a couple of janitor ticks
+ok "$(trash_count)" "1" "still in the trash after the janitor ran"
+hasnt "$(cat "$ST/out")" "TRASH PURGED" "nothing was purged"
 stop_daemon
 
 echo "=== D8: a restart after deleting still resumes the recorded transcript"

@@ -485,6 +485,42 @@ console.log('=== snapshot reload: errored assistant message is visible');
   await tick();
   ok(AC.byId['uiDialog'].hidden === true, 'closing stops it');
 
+  console.log('=== Part 21: the answer shape follows the method, not the label');
+  const AD = newTab();
+  Object.assign(AD.routes, BASE_ROUTES(stateD));
+  AD.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  AD.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q5', method: 'select',
+    title: 'Proceed?', options: ['Yes', 'No', 'Always']})});
+  await tick();
+  await AD.byId['uiOpts'].children[0].onclick();
+  await tick();
+  const sy = AD.posts.find(p => p.path === '/ui_response');
+  ok(sy && sy.body.value === 'Yes' && !('confirmed' in sy.body),
+     'a select option named "Yes" is sent as a value (got ' + JSON.stringify(sy && sy.body) + ')');
+  AD.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q6', method: 'input',
+    title: 'Instead?'})});
+  await tick();
+  AD.byId['uiText'].value = 'No';
+  await AD.byId['uiSend'].onclick();
+  await tick();
+  const tn = AD.posts.filter(p => p.path === '/ui_response').pop();
+  ok(tn && tn.body.id === 'q6' && tn.body.value === 'No' && !('confirmed' in tn.body),
+     'typing "No" into an input is sent as text');
+  AD.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'q7', method: 'confirm',
+    title: 'Really?'})});
+  await tick();
+  await AD.byId['uiOpts'].children[1].onclick();
+  await tick();
+  const cn = AD.posts.filter(p => p.path === '/ui_response').pop();
+  ok(cn && cn.body.id === 'q7' && cn.body.confirmed === false, 'confirm No is still confirmed:false');
+
+  console.log('=== markdown links cannot break out of href');
+  const md = vm.runInContext('mdToHtml', AD.ctx);
+  const html = md('[x](https://a/"onmouseover="alert(1))');
+  ok(!/"onmouseover=/.test(html) && html.includes('&quot;'),
+     'a quote in a link URL is escaped (got ' + html + ')');
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');

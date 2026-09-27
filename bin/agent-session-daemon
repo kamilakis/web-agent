@@ -124,7 +124,7 @@ UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-26.4"
+DAEMON_VERSION = "2026-09-27.1"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -1069,6 +1069,13 @@ class Daemon:
             os.replace(path, dest)
         except OSError as e:
             return {"error": f"could not move the session to the trash: {e}"}
+        # A rename keeps the file's mtime, and purge_trash() ages the trash by
+        # mtime: without this, a transcript last written more than TRASH_DAYS
+        # ago was purged on the very next janitor tick after its "soft" delete.
+        try:
+            os.utime(dest)
+        except OSError as e:
+            log("could not stamp the trashed file; it may be purged early:", e)
         log("SESSION DELETED:", path, "->", dest)
         self.broadcast({"type": "session_deleted", "file": base, "dir": which})
         return {"ok": True, "trashed": dest}
