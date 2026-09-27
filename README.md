@@ -214,8 +214,10 @@ working the moment you switch model or provider. Each message also names its own
 model, so a session that spanned a switch is summed correctly.
 
 **Balance, from a helper — provider-specific and optional.** If
-`AGENT_USAGE_CMD` is set, or an `agent-usage-<provider>` / `<provider>-usage`
-executable is installed, the daemon runs it on a slow clock
+`AGENT_USAGE_CMD` is set (it reports on `AGENT_USAGE_PROVIDER`, default
+`AGENT_PROVIDER`, and is not run for any other provider), or an
+`agent-usage-<provider>` / `<provider>-usage` executable is installed, the
+daemon runs it on a slow clock
 (`AGENT_USAGE_INTERVAL`) and shows what it returns. The contract is JSON:
 
 ```json
@@ -258,8 +260,11 @@ allow-list.
 
 **In the dashboard** a question appears as a modal with a button per option, so
 it reaches you wherever you are — phones included — instead of waiting on a
-tty. A question asked while the page was closed is picked up on reload
-(`GET /ui`). Nothing hangs forever: an unanswered question is cancelled after
+tty. Questions that overlap (parallel tool calls) queue behind each other, and
+one asked while the page was closed or its connection dropped is picked up on
+reload or reconnect (`GET /ui`). The dialog's Cancel picks the gate's own
+**Deny** option, so a refusal is reported to the agent as a denial, not as
+*nobody answered*. Nothing hangs forever: an unanswered question is cancelled after
 `AGENT_UI_TIMEOUT` (default 90s), or after `AGENT_UI_NOUI_GRACE` (15s) when no
 dashboard is connected at all — which is what lets Siri and Matrix turns fail
 closed rather than sit there. The dialog counts that down, and a question that
@@ -311,6 +316,7 @@ nothing personal is baked in.
 | `AGENT_VISION_MODEL` | `deepseek/deepseek-v4-flash-vision-exp` | model auto-selected for image turns |
 | `AGENT_TRASH_DAYS` | `30` | days a deleted transcript stays in `trash/` before the janitor purges it |
 | `AGENT_USAGE_CMD` | unset | command that prints the current provider's account balance as JSON (see *Usage* below) |
+| `AGENT_USAGE_PROVIDER` | `AGENT_PROVIDER` | the provider `AGENT_USAGE_CMD` reports on; on any other provider no balance is shown |
 | `AGENT_USAGE_REFRESH` | `30` | seconds between transcript re-reads for the usage line |
 | `AGENT_USAGE_INTERVAL` | `900` | seconds between balance API calls |
 

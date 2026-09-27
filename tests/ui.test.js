@@ -515,6 +515,91 @@ console.log('=== snapshot reload: errored assistant message is visible');
   const cn = AD.posts.filter(p => p.path === '/ui_response').pop();
   ok(cn && cn.body.id === 'q7' && cn.body.confirmed === false, 'confirm No is still confirmed:false');
 
+  console.log('=== Part 21: overlapping questions queue instead of replacing each other');
+  const AE = newTab();
+  Object.assign(AE.routes, BASE_ROUTES(stateD));
+  AE.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  const gate = ['1) Allow once', '2) Allow for this session', '3) Deny', '4) Deny, but instead…'];
+  AE.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'p1', method: 'select',
+    title: 'first', options: gate})});
+  AE.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'p2', method: 'select',
+    title: 'second', options: gate})});
+  await tick();
+  ok(AE.byId['uiTitle'].textContent === 'first', 'the first question stays on screen');
+  ok(/1 more question waiting/.test(AE.byId['uiExpires'].textContent),
+     'and says another is waiting (got ' + AE.byId['uiExpires'].textContent + ')');
+  await AE.byId['uiOpts'].children[0].onclick();
+  await tick();
+  ok(AE.byId['uiDialog'].hidden === false && AE.byId['uiTitle'].textContent === 'second',
+     'answering it brings up the second');
+  ok(AE.byId['uiCancel'].textContent === 'Cancel (deny)', 'Cancel is labelled as the deny it is');
+  await AE.byId['uiCancel'].onclick();
+  await tick();
+  const den = AE.posts.filter(p => p.path === '/ui_response').pop();
+  ok(den && den.body.id === 'p2' && den.body.value === '3) Deny',
+     'and sends the Deny option, not a bare cancel (got ' + JSON.stringify(den && den.body) + ')');
+  ok(AE.byId['uiDialog'].hidden === true, 'the queue is empty now');
+
+  console.log('=== Part 21: a queued question closed elsewhere leaves the queue');
+  const AF = newTab();
+  Object.assign(AF.routes, BASE_ROUTES(stateD));
+  AF.routes['/ui_response'] = {json: {ok: true}};
+  await tick();
+  AF.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'r1', method: 'confirm',
+    title: 'Overwrite it?', message: 'rm -rf /tmp/build'})});
+  AF.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'r2', method: 'select',
+    title: 'Pick', options: ['a', 'b']})});
+  await tick();
+  ok(AF.byId['uiMessage'].hidden === false &&
+     AF.byId['uiMessage'].textContent === 'rm -rf /tmp/build', 'a confirm shows its message body');
+  ok(AF.byId['uiCancel'].textContent === 'Cancel (No)', 'a confirm Cancel says it is a No');
+  AF.ctx.onEvent({data: JSON.stringify({type: 'ui_resolved', id: 'r2', cancelled: true,
+    why: 'nobody answered in time', method: 'select'})});
+  await tick();
+  ok(AF.byId['uiTitle'].textContent === 'Overwrite it?', 'the one on screen is untouched');
+  ok(!/waiting/.test(AF.byId['uiExpires'].textContent), 'and the waiting count is gone');
+  await AF.byId['uiCancel'].onclick();
+  await tick();
+  const cno = AF.posts.filter(p => p.path === '/ui_response').pop();
+  ok(cno && cno.body.id === 'r1' && cno.body.confirmed === false, 'confirm Cancel answers No');
+  ok(AF.byId['uiDialog'].hidden === true, 'and nothing else comes up');
+  AF.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 'r3', method: 'select',
+    title: 'Pick', options: ['a', 'b']})});
+  await tick();
+  ok(AF.byId['uiCancel'].textContent === 'Cancel', 'a select with no deny has a plain Cancel');
+  ok(AF.byId['uiMessage'].hidden === true, 'and no stale message body');
+
+  console.log('=== Part 21: an SSE reconnect resyncs the questions');
+  const AG = newTab();
+  Object.assign(AG.routes, BASE_ROUTES(stateD));
+  AG.routes['/ui'] = {json: {pending: []}};
+  await tick();
+  const es = vm.runInContext('es', AG.ctx);
+  await es.onopen();                       // the first open
+  AG.ctx.onEvent({data: JSON.stringify({type: 'ui_request', id: 's1', method: 'select',
+    title: 'stale', options: ['a']})});
+  await tick();
+  AG.routes['/ui'] = {json: {pending: [{id: 's2', method: 'select', title: 'asked while away',
+                                        options: ['a']}]}};
+  await es.onopen();                       // back after a dropped stream
+  await tick();
+  ok(AG.byId['uiTitle'].textContent === 'asked while away',
+     'a question asked while disconnected appears, and one closed meanwhile goes');
+
+  console.log('=== Part 20: a balance in minor units uses its exponent');
+  const AH = newTab();
+  Object.assign(AH.routes, BASE_ROUTES(stateD));
+  AH.routes['/usage'] = {json: {
+    provider: 'deepseek', model: 'deepseek-flash',
+    session: {messages: 1, input: 10, output: 5, cost: 0.01},
+    today: {messages: 1, input: 10, output: 5, cost: 0.01},
+    balance: {ok: true, currency: 'USD', total: 440, exponent: 2},
+  }};
+  await tick();
+  ok(AH.byId['usage'].textContent.includes('$4.40 left'),
+     '440 with exponent 2 is $4.40 (got ' + AH.byId['usage'].textContent + ')');
+
   console.log('=== markdown links cannot break out of href');
   const md = vm.runInContext('mdToHtml', AD.ctx);
   const html = md('[x](https://a/"onmouseover="alert(1))');
