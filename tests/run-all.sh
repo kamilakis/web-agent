@@ -20,6 +20,8 @@ run node ui.test.js
 # classifier table too when it is installed.
 GATE="$HOME/.pi/agent/extensions/approval-gate/classify.test.mjs"
 [ -f "$GATE" ] && run node "$GATE"
+GATE_DECISIONS="$HOME/.pi/agent/extensions/approval-gate/index.test.mjs"
+[ -f "$GATE_DECISIONS" ] && run node --experimental-strip-types "$GATE_DECISIONS"
 run bash opensession.test.sh
 run bash delete.test.sh
 run bash version.test.sh
