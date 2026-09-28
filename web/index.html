@@ -902,9 +902,10 @@ async function loadUpdate() {
   } catch { /* a restart in progress: keep the last state */ }
   renderUpdate();
 }
-function showUpdateBar(text, {go = false, bad = false, later = 'Later', title = ''} = {}) {
+function showUpdateBar(text, {go = false, bad = false, later = 'Later', title = '', key = ''} = {}) {
   updateText.textContent = text;
   updateBar.title = title || text;
+  updateBar.dataset.key = key;
   updateGo.hidden = !go;
   updateGo.disabled = false;
   updateLater.hidden = !later;
@@ -941,17 +942,32 @@ function renderUpdate() {
                   ': ' + (run.message || ''), {bad: true, later: 'OK'});
     return;
   }
+  const local = u.local_ahead || 0;
   if (u.available && lsGet('wa-update-later') !== u.latest) {
     const list = (u.commits || []).map(c => c.sha + '  ' + c.subject).join('\n');
     const first = (u.commits && u.commits[0]) ? ' \u00b7 ' + u.commits[0].subject : '';
     const n = u.behind || (u.commits || []).length;
     if (u.can_update) {
       showUpdateBar('Update available \u00b7 ' + n + ' commit' + (n === 1 ? '' : 's') + first,
-                    {go: true, title: list});
+                    {go: true, title: list, key: u.latest});
     } else {
-      showUpdateBar('Update available, but ' + (u.blocked || u.error || 'it cannot be applied'),
-                    {bad: true, title: list});
+      // Local commits are why a checkout diverges; saying so turns "the
+      // Update button is broken" into something the user can act on.
+      showUpdateBar('Update available, but ' + (u.blocked || u.error || 'it cannot be applied') +
+                    (local ? ' (' + local + ' local commit' + (local === 1 ? '' : 's') + ')' : ''),
+                    {bad: true, title: list, key: u.latest});
     }
+    return;
+  }
+  // Nothing on origin, but the checkout itself has moved past what is
+  // installed. That is the normal state on a box that commits before it
+  // pushes, and hiding the bar left no clue that anything was pending.
+  const localKey = 'local:' + (u.latest || '') + ':' + local;
+  if (local && lsGet('wa-update-later') !== localKey) {
+    const list = (u.local_commits || []).map(c => c.sha + '  ' + c.subject).join('\n');
+    showUpdateBar(local + ' local commit' + (local === 1 ? '' : 's') +
+                  ' are not on origin/master \u2014 push them to update from here',
+                  {later: 'OK', title: list, key: localKey});
     return;
   }
   updateBar.hidden = true;
@@ -966,7 +982,8 @@ function dismissUpdate() {
   const u = updateInfo || {};
   const run = u.run || {};
   if (run.finished && run.state !== 'ok') lsSet('wa-update-seen', String(run.finished));
-  if (u.available && u.latest) lsSet('wa-update-later', u.latest);
+  const key = updateBar.dataset && updateBar.dataset.key;
+  if (key) lsSet('wa-update-later', key);
   updateBar.hidden = true;
 }
 updateGo.onclick = async () => {

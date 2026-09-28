@@ -53,6 +53,27 @@ ok "$(jget "$U" "['can_update']")" "False" "no button"
 ok "$(code POST /update '{}')" "409" "and POST /update refuses"
 ok "$(calls)" "0" "without starting the updater"
 
+echo "=== commits in the checkout that origin does not have are reported"
+# The dashboard installs from origin, so local-only work used to produce a
+# blank header and no clue that anything was pending.
+sse_start
+echo local-work >>"$CHECKOUT/f"
+git -C "$CHECKOUT" commit -qam "a local commit"
+U=$(api POST /update/check '{}')
+sleep 0.3; sse_stop
+ok "$(jget "$U" "['available']")" "False" "nothing new on origin"
+ok "$(jget "$U" "['behind']")" "0" "so nothing is offered from it"
+ok "$(jget "$U" "['local_ahead']")" "1" "but the checkout is one commit past the build"
+ok "$(jget "$U" "['local_commits'][0]['subject']")" "a local commit" "with its subject"
+ok "$(jget "$U" "['can_update']")" "False" "and the updater still refuses"
+has "$(jget "$U" "['blocked']")" "diverged" "saying why"
+ok "$(code POST /update '{}')" "409" "POST /update refuses too"
+ok "$(calls)" "0" "without starting the updater"
+has "$(cat "$ST/sse")" '"update_available"' "and an open page is told, not left blank"
+git -C "$CHECKOUT" reset -q --hard origin/master
+U=$(api POST /update/check '{}')
+ok "$(jget "$U" "['local_ahead']")" "0" "and it goes quiet once the checkout is level again"
+
 echo "=== a new commit on origin/master is offered"
 push_commit "move the archive button"
 push_commit "smaller text"

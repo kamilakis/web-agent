@@ -1825,6 +1825,7 @@ class Daemon:
         snap = {"checked": time.time(), "branch": UPDATE_BRANCH, "repo": repo,
                 "available": False, "behind": 0, "commits": [],
                 "installed": None, "latest": None, "can_update": False,
+                "local_ahead": 0, "local_commits": [],
                 "blocked": None, "error": None}
         if not repo:
             snap["error"] = "no git checkout recorded (run ./install.sh from one)"
@@ -1853,6 +1854,18 @@ class Daemon:
         snap["behind"] = int(n) if ok and n.isdigit() else len(commits)
         snap["commits"] = commits
         snap["available"] = snap["behind"] > 0
+        # Work sitting in the checkout that origin does not have. It is
+        # invisible to `behind`, which only ever looks at origin, and it is
+        # also the thing that makes the fast-forward impossible — so a user
+        # who commits locally and does not push saw a blank header and a
+        # daemon that knew exactly why. Report it instead.
+        ok, n = _git(repo, "rev-list", "--count", f"{base}..HEAD")
+        snap["local_ahead"] = int(n) if ok and n.isdigit() else 0
+        ok, out = _git(repo, "log", "--format=%h%x09%s", "--max-count=20",
+                       f"{base}..HEAD")
+        snap["local_commits"] = [dict(zip(("sha", "subject"), l.split("\t", 1)))
+                                 for l in out.splitlines() if "\t" in l] \
+            if snap["local_ahead"] and ok else []
         # Mirror agent-update's own refusals, so the button is honest.
         ok, cur = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
         ok2, dirty = _git(repo, "status", "--porcelain")
@@ -1871,10 +1884,17 @@ class Daemon:
         with self.lock:
             prev = self.update_info
             self.update_info = snap
-        if snap.get("available") and (not prev or prev.get("latest") != snap.get("latest")
-                                      or not prev.get("available")):
+        remote_moved = (not prev or prev.get("latest") != snap.get("latest")
+                        or not prev.get("available"))
+        local_moved = (not prev or prev.get("local_ahead") != snap.get("local_ahead"))
+        if snap.get("available") and remote_moved:
             log("update available:", snap.get("installed"), "->", snap.get("latest"),
                 f"({snap.get('behind')} commits)")
+            self.broadcast({"type": "update_available", **self.update_state()})
+        elif snap.get("local_ahead") and local_moved:
+            # Committed here but not pushed: the dashboard cannot install it,
+            # and an open page should say so without waiting for a reload.
+            log("checkout is ahead of origin:", snap.get("local_ahead"), "local commit(s)")
             self.broadcast({"type": "update_available", **self.update_state()})
         return snap
 

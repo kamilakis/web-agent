@@ -84,7 +84,14 @@ function newTab() {
     },
     EventSource: function () { return {addEventListener() {}, close() {}}; },
     location: {origin: 'http://x', protocol: 'http:', host: 'x'},
-    localStorage: {getItem: () => null, setItem: () => {}, removeItem: () => {}},
+    localStorage: {
+      // A real store, so a dismissal can be shown to survive the next poll.
+      // Every tab gets its own, as a browser profile would per origin.
+      _v: {},
+      getItem(k) { return Object.prototype.hasOwnProperty.call(this._v, k) ? this._v[k] : null; },
+      setItem(k, v) { this._v[k] = String(v); },
+      removeItem(k) { delete this._v[k]; },
+    },
     navigator: {userAgent: 'node'}, window: undefined, requestAnimationFrame: () => {},
     URLSearchParams, URL, TextEncoder, TextDecoder,
     encodeURIComponent, decodeURIComponent, parseInt, parseFloat, isNaN,
@@ -680,6 +687,32 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(/but the checkout has uncommitted changes/.test(UB.byId['updateText'].textContent),
      'says why it cannot update');
   ok(UB.byId['updateGo'].hidden === true, 'and has no Update button');
+
+  console.log('=== §22 commits in the checkout that origin does not have are reported');
+  const UL = newTab();
+  Object.assign(UL.routes, BASE_ROUTES(stateD));
+  UL.routes['GET /update'] = {json: {available: false, behind: 0, can_update: false,
+    installed: 'aaa1111', latest: 'aaa1111', local_ahead: 2, local_commits: [
+      {sha: 'ccc3333', subject: 'the gate stops asking for notes'},
+      {sha: 'bbb2222', subject: 'list sessions by name'}]}};
+  await tick(); await tick(); await tick();
+  ok(UL.byId['updateBar'].hidden === false,
+     'the header is not blank while local work is uninstalled');
+  ok(/2 local commits are not on origin\/master/.test(UL.byId['updateText'].textContent),
+     'says how many and where they are (got ' + UL.byId['updateText'].textContent + ')');
+  ok(/ccc3333/.test(UL.byId['updateBar'].title), 'and names them in the tooltip');
+  ok(UL.byId['updateGo'].hidden === true, 'with no Update button, because it cannot work');
+  // Dismissing has to stick, or the bar comes back on the next poll.
+  UL.byId['updateLater'].onclick();
+  await tick();
+  ok(UL.byId['updateBar'].hidden === true, 'OK hides it');
+  await UL.ctx.loadUpdate();
+  ok(UL.byId['updateBar'].hidden === true, 'and it stays hidden across a reload');
+  // One more local commit is news again.
+  UL.routes['GET /update'] = {json: {available: false, local_ahead: 3,
+    latest: 'aaa1111', local_commits: [{sha: 'ddd4444', subject: 'newer work'}]}};
+  await UL.ctx.loadUpdate();
+  ok(UL.byId['updateBar'].hidden === false, 'but a new local commit is worth saying again');
 
   console.log('=== §22 progress, and a failed update');
   const UC = newTab();
