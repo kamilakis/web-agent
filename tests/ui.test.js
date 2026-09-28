@@ -256,6 +256,31 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(!labels.includes('Archived'), 'an active archive-flagged file is not shown as Archived');
   ok(labels.includes('Running'), 'it is shown as Running instead');
 
+  console.log('=== the sidebar leads with the session name, first prompt underneath');
+  const N = newTab();
+  Object.assign(N.routes, BASE_ROUTES(stateA));
+  N.routes['/sessions'] = {sessions: [
+    {name: 'named.jsonl', dir: 'archive', sessionName: 'Contracts',
+     title: 'Find old email exchanges with the supplier',
+     active: false, mtime: 4, count: 83},
+    {name: 'anon.jsonl', dir: 'sessions', sessionName: null, title: 'Hello there',
+     active: false, mtime: 5, count: 3},
+  ]};
+  await tick();
+  const items = find(N.byId['sessList'], 'sb-item');
+  const named = items.find(i => i.textContent.includes('Contracts'));
+  ok(!!named, 'a named session is listed under the name it was given');
+  ok(named && find(named, 't')[0].textContent === 'Contracts', 'the name is the leading line');
+  const namedP = named && find(named, 'p')[0];
+  ok(namedP && namedP.textContent.startsWith('Find old email exchanges'),
+     'the first prompt is the sub-line');
+  ok(named && named.children.indexOf(namedP) > named.children.indexOf(find(named, 'm')[0]),
+     'the prompt sits under the date/msgs line');
+  const anon = items.find(i => i.textContent.includes('Hello there'));
+  ok(anon && find(anon, 't')[0].textContent === 'Hello there',
+     'an unnamed session still leads with its first prompt');
+  ok(anon && find(anon, 'p').length === 0, 'and does not repeat it as a sub-line');
+
   console.log('=== Part C: the Delete button');
   const stateD = {model: {provider: 'anthropic', id: 'claude-opus-4'},
                   sessionName: 'live session', isStreaming: false};

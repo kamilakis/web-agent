@@ -58,8 +58,10 @@ across surfaces.
   the dashboard lists them (previous + archived), opens any of them
   read-only, and can **archive the running session** or **start a new one**
   without restarting the daemon:
-  - `GET /sessions` — list `sessions/` and `archive/` with first-prompt
-    title, message count and timestamps; the active file is flagged
+  - `GET /sessions` — list `sessions/` and `archive/` with the session's
+    **name** and first-prompt title, message count and timestamps; the active
+    file is flagged. The sidebar leads with the name (the thing you search
+    for) and shows the first prompt on a dimmer line underneath
   - `GET /session?file=&dir=` — one transcript as a messages snapshot
     (thinking stripped, tool results capped), rendered by the same snapshot
     renderer as the live view; basename + dir allowlist, `realpath`

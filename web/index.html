@@ -98,9 +98,12 @@ body {
 .sb-item:hover { background:var(--elev); }
 .sb-item.active { background:var(--elev); box-shadow:inset 0 0 0 1px var(--accent); }
 .sb-item.viewing { box-shadow:inset 0 0 0 1.5px var(--accent); }
-.sb-item .t { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sb-item .t { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
 .sb-item .m { display:flex; gap:7px; font:10.5px/1.3 var(--mono); color:var(--dim); white-space:nowrap; overflow:hidden; }
 .sb-item .m .badge { color:var(--ok); font-weight:700; }
+/* The first prompt, under the date/count. Dimmer and smaller than the name so
+   the eye lands on what the session is called. */
+.sb-item .p { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11.5px; line-height:1.3; color:var(--dim); opacity:.85; }
 .sb-toggle {
   display:none; width:30px; height:30px; padding:0;
   background:var(--surface); color:var(--text);
@@ -746,12 +749,21 @@ function sessionItem(s) {
   b.type = 'button';
   const sel = (viewing && viewing.file === s.name && viewing.dir === s.dir);
   b.className = 'sb-item' + (s.active ? ' active' : '') + (sel ? ' viewing' : '');
-  b.appendChild(el('span', 't', s.title || s.name));
+  // The name is what the user typed and therefore what they search for, so it
+  // leads. Rendering only the first prompt used to hide a session called
+  // "Contracts" behind "Find old email exchanges with…".
+  b.appendChild(el('span', 't', s.sessionName || s.title || s.name));
   const m = el('span', 'm');
   m.appendChild(el('span', '', fmtDate(s)));
   m.appendChild(el('span', '', (s.count || 0) + ' msgs'));
   if (s.active) m.appendChild(el('span', 'badge', 'live'));
   b.appendChild(m);
+  // Only when it adds something: an unnamed session's title IS its name.
+  if (s.sessionName && s.title && s.title !== s.sessionName) {
+    const p = el('span', 'p', s.title);
+    p.setAttribute('title', s.title);
+    b.appendChild(p);
+  }
   b.onclick = () => s.active ? returnToLive() : openSession(s);
   return b;
 }
@@ -793,7 +805,8 @@ async function openSession(s) {
                           + '&dir=' + s.dir, {headers: H});
     const data = await r.json();
     if (data.error) { sbMsg(data.error); return; }
-    viewing = {file: s.name, dir: s.dir, title: s.title || s.name};
+    viewing = {file: s.name, dir: s.dir,
+               title: s.sessionName || s.title || s.name};
     bannerTitle.textContent = 'Viewing ' + viewing.title;
     banner.hidden = false;
     foot.hidden = true;
