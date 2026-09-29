@@ -988,8 +988,9 @@ function renderUpdate() {
   const localKey = 'local:' + (u.latest || '') + ':' + local;
   if (local && lsGet('wa-update-later') !== localKey) {
     const list = (u.local_commits || []).map(c => c.sha + '  ' + c.subject).join('\n');
-    showUpdateBar(local + ' local commit' + (local === 1 ? '' : 's') +
-                  ' are not on origin/master \u2014 push them to update from here',
+    showUpdateBar(local + ' local commit' + (local === 1 ? ' is' : 's are') +
+                  ' not on origin/master \u2014 push ' + (local === 1 ? 'it' : 'them') +
+                  ' to update from here',
                   {later: 'OK', title: list, key: localKey});
     return;
   }

@@ -713,6 +713,12 @@ console.log('=== snapshot reload: errored assistant message is visible');
     latest: 'aaa1111', local_commits: [{sha: 'ddd4444', subject: 'newer work'}]}};
   await UL.ctx.loadUpdate();
   ok(UL.byId['updateBar'].hidden === false, 'but a new local commit is worth saying again');
+  // The singular has to read as English; the first cut said "1 local commit are".
+  UL.routes['GET /update'] = {json: {available: false, local_ahead: 1,
+    latest: 'aaa1111', local_commits: [{sha: 'ddd4444', subject: 'newer work'}]}};
+  await UL.ctx.loadUpdate();
+  ok(/^1 local commit is not on origin\/master/.test(UL.byId['updateText'].textContent),
+     'one local commit reads as one (got ' + UL.byId['updateText'].textContent + ')');
 
   console.log('=== §22 progress, and a failed update');
   const UC = newTab();
