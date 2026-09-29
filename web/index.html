@@ -417,6 +417,29 @@ details.tool .sec { display:flex; gap:8px; }
 details.tool .sec + .sec { margin-top:4px; }
 details.tool .lbl { flex:0 0 auto; width:42px; color:var(--dim); opacity:.6; }
 details.tool .body { flex:1 1 auto; min-width:0; }
+/* one line per run of tool calls: shows the newest step; open it for all.
+   Child selectors only — the rows nested inside keep their own dots. */
+details.steps { width:100%; margin:6px 0 8px; font-family:var(--mono); font-size:12.5px; }
+details.steps > summary {
+  display:flex; align-items:center; gap:7px;
+  list-style:none; cursor:pointer; user-select:none;
+  padding:1px 0; color:var(--dim);
+}
+details.steps > summary::-webkit-details-marker { display:none; }
+details.steps > summary .dot { background:var(--dim); }
+details.steps.running > summary .dot { background:var(--accent); animation:pulse .9s ease-in-out infinite alternate; }
+details.steps.done > summary .dot { background:var(--ok); animation:none; }
+details.steps.error > summary .dot { background:var(--danger); animation:none; }
+details.steps > summary .desc {
+  flex:1 1 auto; min-width:0; color:var(--text); font-family:var(--sans);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+details.steps.curerr > summary .desc { color:var(--danger); }
+details.steps > summary .name { flex:0 0 auto; color:var(--dim); font-size:11px; opacity:.75; }
+details.steps > summary .chev { flex:0 0 auto; font-size:10px; opacity:.5; transition:transform .15s; }
+details.steps[open] > summary .chev { transform:rotate(90deg); }
+details.steps > .list { margin:5px 0 0 3px; padding-left:12px; border-left:2px solid var(--border); }
+details.steps > .list > details.tool { margin:2px 0; }
 .empty {
   margin:auto; padding:40px 24px; text-align:center;
   color:var(--dim); font-size:14px;
@@ -573,7 +596,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-27.10';
+const UI_VERSION = '2026-09-29.1';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -1704,6 +1727,7 @@ function setToolArgs(row, args) {
   const desc = row.querySelector('.desc');
   if (desc) desc.textContent = describeTool(row._name, args);
   paintTool(row);
+  paintSteps(row._group);
 }
 function finishTool(row, txt, isError) {
   if (txt) row._result = txt;
@@ -1714,6 +1738,7 @@ function finishTool(row, txt, isError) {
     const first = String(row._result || '').trim().split('\n')[0];
     if (first) row.querySelector('.desc').textContent = toolEllipsise(first, 100);
   }
+  paintSteps(row._group);
 }
 function newToolRow(name, id) {
   const row = toolRow(name, id);
@@ -1741,6 +1766,7 @@ function settleToolRows() {
       if (!row.classList.contains('running')) continue;
       row.classList.remove('running');
       row.classList.add('done');
+      paintSteps(row._group);
     }
   }
   resetToolRows();
@@ -1754,7 +1780,75 @@ function standaloneResultRow(name, txt, isError) {
   return row;
 }
 // --- toolRows:end ---
+
+// ---- steps: one line for a run of tool calls ----
+// Consecutive tool calls (and the thinking between them) collapse into one
+// line that always shows the latest step, so a 12-command turn is one line,
+// not twelve. Tap it for every step, each still expandable to its call and
+// result. Text from the agent, a user prompt or an error ends the run; the
+// next tool call starts a new line. Live and reloaded views build it the same.
+// --- toolSteps:start ---
+let curSteps = null;            // the line still collecting steps, if any
+function stepsGroup(parent) {
+  if (curSteps) return curSteps;
+  const g = el('details', 'steps running');
+  const s = el('summary');
+  s.appendChild(el('span', 'dot'));
+  s.appendChild(el('span', 'desc', ''));
+  s.appendChild(el('span', 'name', ''));
+  s.appendChild(el('span', 'chev', '›'));
+  g.appendChild(s);
+  g._list = el('div', 'list');
+  g.appendChild(g._list);
+  g._rows = [];
+  g._live = true;
+  g._thinking = false;
+  parent.appendChild(g);
+  curSteps = g;
+  return g;
+}
+function addStep(g, row) {
+  row._group = g;
+  g._rows.push(row);
+  g._list.appendChild(row);
+  paintSteps(g);
+  return row;
+}
+const stepState = r => ['running', 'done', 'error'].find(c => r.classList.contains(c));
+function paintSteps(g) {
+  if (!g) return;
+  const rows = g._rows;
+  const running = rows.filter(r => stepState(r) === 'running');
+  // the newest step still running, else the newest step
+  const cur = running.length ? running[running.length - 1] : rows[rows.length - 1];
+  let desc = cur ? cur.querySelector('.desc').textContent : '';
+  if (g._thinking) desc = 'Thinking…';
+  const state = g._live ? 'running'
+    : rows.some(r => stepState(r) === 'error') ? 'error' : 'done';
+  g.className = 'steps ' + state +
+    (!g._thinking && cur && stepState(cur) === 'error' ? ' curerr' : '');
+  g.querySelector('.desc').textContent = desc;
+  g.querySelector('.name').textContent = rows.length > 1 ? rows.length + ' steps'
+    : cur ? cur.querySelector('.name').textContent : '';
+}
+function setThinking(g, on) {
+  if (!g) return;
+  g._thinking = on;
+  paintSteps(g);
+}
+// End the run. A line that only ever showed "Thinking…" leaves no trace.
+function closeSteps() {
+  const g = curSteps;
+  if (!g) return;
+  curSteps = null;
+  g._live = false;
+  g._thinking = false;
+  if (!g._rows.length) { if (g.parentNode) g.parentNode.removeChild(g); return; }
+  paintSteps(g);
+}
+// --- toolSteps:end ---
 function appendUser(t, images) {
+  closeSteps();
   const m = el('div', 'msg user');
   if (t) {   // image-only sends have nothing to copy
     const cp = document.createElement('button');
@@ -1786,6 +1880,7 @@ function textOf(content) {
 function renderSnapshot(msgs, readOnly) {
   logEl.innerHTML = '';
   resetToolRows();
+  curSteps = null;
   if (!msgs.length) logEl.appendChild(el('div', 'empty', 'Nothing here yet. Say hello.'));
   // §16 staleness: a choose block is only tappable on the very last message —
   // anything after it (the choice, a follow-up turn) makes it plain text.
@@ -1805,6 +1900,8 @@ function renderSnapshot(msgs, readOnly) {
       const canChoose = !readOnly && (i === lastAsst && i === msgs.length - 1);
       for (const c of content) {
         if (c.type === 'text') {
+          if (!String(c.text || '').trim()) continue;
+          closeSteps();
           const b = el('div', 'bubble');
           if (!(canChoose && applyChooseBlock(b, c.text))) b.innerHTML = mdToHtml(c.text);
           b._raw = c.text;
@@ -1813,24 +1910,29 @@ function renderSnapshot(msgs, readOnly) {
         else if (c.type === 'toolCall') {
           // §8 L3: the same row shape as the live stream, so a reloaded turn
           // and a streamed one look identical.
-          const row = newToolRow(c.name, c.id);
+          const row = addStep(stepsGroup(msg), newToolRow(c.name, c.id));
           const args = c.arguments !== undefined ? c.arguments : c.input;
           setToolArgs(row, args);
           row.classList.remove('running');
           row.classList.add('done');
-          msg.appendChild(row);
+          paintSteps(row._group);
         }
       }
-      if (m.stopReason === 'error') msg.appendChild(errorBubble(m.errorMessage));
+      if (m.stopReason === 'error') { closeSteps(); msg.appendChild(errorBubble(m.errorMessage)); }
       if (msg.children.length) logEl.appendChild(msg);
     } else if (m.role === 'toolResult') {
       // §8 L6: paired by toolCallId, not appended as its own "result" row.
       const txt = toolResultText({content: content});
       const row = m.toolCallId ? toolRows.get(m.toolCallId) : null;
       if (row) finishTool(row, txt, !!m.isError);
-      else if (txt) logEl.appendChild(standaloneResultRow(m.toolName, txt, !!m.isError));
+      else if (txt) {
+        const msg = el('div', 'msg assistant');
+        addStep(stepsGroup(msg), standaloneResultRow(m.toolName, txt, !!m.isError));
+        if (msg.children.length) logEl.appendChild(msg);
+      }
     }
   }
+  closeSteps();
   unboundTools = [];   // nothing rendered here will ever be bound by a live event
   const lastAsstMsg = [...logEl.querySelectorAll('.msg.assistant')].pop();
   if (lastAsstMsg) addWholeCopy(lastAsstMsg);
@@ -1838,6 +1940,9 @@ function renderSnapshot(msgs, readOnly) {
 }
 
 // ---- live streaming ----
+// The open steps line, else a new one. A run spans assistant messages, so only
+// make a message box when there is no line to join (no empty boxes, no gaps).
+function liveSteps() { return curSteps || stepsGroup(ensureMsg()); }
 function onEvent(e) {
   let ev;
   try { ev = JSON.parse(e.data); } catch { return; }
@@ -1885,7 +1990,7 @@ function onEvent(e) {
   } else if (t === 'agent_settled') {
     const finished = curBubble;
     maybeApplyChoices();   // §16: parse before resetStream eats the raw text
-    setStatus(false); resetStream(); settleToolRows();
+    setStatus(false); resetStream(); settleToolRows(); closeSteps();
     addWholeCopy(finished);
   } else if (t === 'message_start') {
     const m = ev.message || {};
@@ -1906,17 +2011,27 @@ function onEvent(e) {
     endCaret();
     const m = ev.message || {};
     if (m.role === 'assistant' && m.stopReason === 'error') {
+      closeSteps();
       ensureMsg().appendChild(errorBubble(m.errorMessage));
       scrollBottom();
     }
   } else if (t === 'message_update') {
     const d = ev.assistantMessageEvent || {};
     if (d.type === 'text_delta') {
+      // whitespace between tool calls is not an answer — don't end the run
+      if (!curTxt && !String(d.delta || '').trim()) return;
+      closeSteps();
       appendDelta(d.delta); scrollBottom();
+    } else if (d.type === 'thinking_start') {
+      setThinking(liveSteps(), true); scrollBottom();
+    } else if (d.type === 'thinking_end') {
+      setThinking(curSteps, false);
     } else if (d.type === 'toolcall_start') {
       // §8 L1/L2: rows are keyed by toolCallId from here on, so parallel calls
-      // each keep their own row and their own result.
-      ensureMsg().appendChild(newToolRow(d.toolName, d.id)); scrollBottom();
+      // each keep their own row and their own result. They all land in the
+      // current steps line, which shows the newest.
+      setThinking(curSteps, false);
+      addStep(liveSteps(), newToolRow(d.toolName, d.id)); scrollBottom();
     } else if (d.type === 'toolcall_end') {
       const tc = d.toolCall || {};
       const row = bindToolRow(tc.id, tc.name);
@@ -1931,6 +2046,7 @@ function onEvent(e) {
       const txt = toolResultText(ev.partialResult);
       if (txt) row._result = txt;
       paintTool(row);
+      paintSteps(row._group);
     }
   } else if (t === 'tool_execution_end') {
     const row = bindToolRow(ev.toolCallId, ev.toolName);

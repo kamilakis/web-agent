@@ -284,6 +284,17 @@ duplicates. The screenshots do show these rendering bugs:
   when no call with that id is on screen (old snapshot, or truncated by
   `MSG_SNAPSHOT=50`).
 
+**Steps line (added 2026-09-29, owner's request).** One row per call still made
+a long turn a wall of rows. Consecutive tool calls, and the thinking between
+them, now collapse into **one line that always shows the newest step**: the
+running call, else "Thinking…", else the last call. On the right is `N steps`
+(or the tool tag for a single step). The dot pulses while the run is open, then
+turns green, or red if any step failed. Tapping the line lists every step, and
+each step still expands to its call and result. Agent text, a user prompt or an
+error ends the run, and the next call starts a new line. A thinking-only line is
+removed. The code is the `toolSteps` block in `index.html`, tested in
+`tests/toolRows.test.js`.
+
 ### 8.3 Where descriptions come from
 
 **Tier 1 (build this): a deterministic client-side `describeTool(name, args)`.**

@@ -18,6 +18,8 @@ function makeEl(tag) {
     tagName: tag, className: '', children: [], dataset: {}, parent: null,
     _text: '',
     appendChild(c) { c.parent = e; e.children.push(c); return c; },
+    removeChild(c) { e.children = e.children.filter(x => x !== c); c.parent = null; return c; },
+    get parentNode() { return e.parent; },
     get textContent() {
       return e.children.length ? e.children.map(c => c.textContent).join('') : e._text;
     },
@@ -58,9 +60,11 @@ function block(name) {
 }
 const sandbox = {console, document, el};
 vm.createContext(sandbox);
-vm.runInContext(block('describeTool') + block('toolRows') + `
+vm.runInContext(block('describeTool') + block('toolRows') + block('toolSteps') + `
 ;globalThis.api = {newToolRow, bindToolRow, setToolArgs, finishTool, resetToolRows,
                    settleToolRows, toolResultText,
+                   stepsGroup, addStep, paintSteps, setThinking, closeSteps,
+                   get curSteps() { return curSteps; },
                    // live bindings: resetToolRows() swaps the Map's identity
                    get toolRows() { return toolRows; },
                    get unboundTools() { return unboundTools; }};`, sandbox);
@@ -192,6 +196,81 @@ function outcomes(root) {
      api.toolResultText({content: [{type: 'text', text: long}]}).length, 2049);
   is('non-text result blocks are ignored',
      api.toolResultText({content: [{type: 'image', data: 'zzz'}]}), '');
+}
+
+// --- steps: a run of commands is ONE line showing the newest step ----------
+function line(g) {
+  return {desc: g.querySelector('.desc').textContent,
+          tag: g.querySelector('.name').textContent,
+          state: ['running', 'done', 'error'].find(c => g.classList.contains(c)),
+          curerr: g.classList.contains('curerr')};
+}
+{
+  api.resetToolRows(); api.closeSteps();
+  const msg = el('div', 'msg assistant');
+  // turn: think -> bash -> think -> memos search -> (next message) read -> text
+  const g = api.stepsGroup(msg);
+  api.setThinking(g, true);
+  is('steps: thinking shows in the line', line(g).desc, 'Thinking…');
+  api.setThinking(g, false);
+  const r1 = api.addStep(api.stepsGroup(msg), api.newToolRow('bash', 'k1'));
+  is('steps: a new call reuses the open line', api.stepsGroup(msg) === g, true);
+  is('steps: preparing while args stream', line(g).desc, 'Preparing Bash…');
+  api.setToolArgs(r1, {command: 'ls /srv'});
+  is('steps: args replace the placeholder', line(g).desc, 'Running ls /srv');
+  api.finishTool(r1, 'a b c', false);
+  api.setThinking(g, true);
+  is('steps: thinking replaces the finished command', line(g).desc, 'Thinking…');
+  api.setThinking(g, false);
+  api.resetToolRows();                       // message_start of the next step
+  const r2 = api.addStep(api.stepsGroup(msg), api.newToolRow('mcp__memos__search_memos', 'k2'));
+  api.setToolArgs(r2, {query: 'fleet'});
+  is('steps: the next command replaces the previous', line(g),
+     {desc: 'Searching memos for “fleet”', tag: '2 steps', state: 'running', curerr: false});
+  is('steps: still one line in the message', msg.children.length, 1);
+  is('steps: every step is kept inside it', g._list.children.length, 2);
+  api.finishTool(r2, 'nothing', true);
+  is('steps: an errored newest step shows red', line(g).curerr, true);
+  const r3 = api.addStep(api.stepsGroup(msg), api.newToolRow('read', 'k3'));
+  api.setToolArgs(r3, {file_path: '/etc/hosts'});
+  is('steps: a running step wins over the errored one', line(g).curerr, false);
+  api.finishTool(r3, '127.0.0.1', false);
+  is('steps: while the run is open the dot keeps pulsing', line(g).state, 'running');
+  api.closeSteps();                          // text arrives
+  is('steps: closed line shows the last step', line(g).desc, 'Reading hosts');
+  is('steps: and turns red if any step failed', line(g).state, 'error');
+  is('steps: count', line(g).tag, '3 steps');
+  is('steps: after closing, the next call opens a new line',
+     api.stepsGroup(msg) === g, false);
+  api.closeSteps();
+  is('steps: an empty line is removed on close', msg.children.length, 1);
+}
+{
+  api.resetToolRows(); api.closeSteps();
+  const msg = el('div', 'msg assistant');
+  const g = api.stepsGroup(msg);
+  api.setThinking(g, true);
+  api.closeSteps();                          // thought, then answered in text
+  is('steps: thinking-only line leaves no trace', msg.children.length, 0);
+}
+{
+  api.resetToolRows(); api.closeSteps();
+  const msg = el('div', 'msg assistant');
+  const r = api.addStep(api.stepsGroup(msg), api.newToolRow('grep', 'p1'));
+  api.setToolArgs(r, {pattern: 'x'});
+  api.finishTool(r, 'hit', false);
+  api.closeSteps();
+  is('steps: a single step shows its tool tag, green', line(msg.children[0]),
+     {desc: 'Searching files for “x”', tag: 'grep', state: 'done', curerr: false});
+}
+{
+  // abort: rows still running at settle end up done, and the line with them
+  api.resetToolRows(); api.closeSteps();
+  const msg = el('div', 'msg assistant');
+  const r = api.addStep(api.stepsGroup(msg), api.newToolRow('bash', 'z1'));
+  api.setToolArgs(r, {command: 'sleep 99'});
+  api.settleToolRows(); api.closeSteps();
+  is('steps: settle finishes the line', line(msg.children[0]).state, 'done');
 }
 
 if (failures.length) {
