@@ -126,6 +126,12 @@ USAGE_PROVIDER = os.environ.get("AGENT_USAGE_PROVIDER") or PROVIDER
 UI_TIMEOUT = int(os.environ.get("AGENT_UI_TIMEOUT", "90"))
 UI_NOUI_GRACE = int(os.environ.get("AGENT_UI_NOUI_GRACE", "15"))
 
+# §23 SSE keep-alive. A real `data:` event, not an SSE comment: comments never
+# reach page scripts, so a page could not tell a quiet stream from a dead one
+# (an iPhone web app resumed from the lock screen often holds a socket that is
+# "open" but delivers nothing). The page reconnects after a few missed pings.
+SSE_PING = float(os.environ.get("AGENT_SSE_PING", "15"))
+
 # Self-update (§22). The daemon checks the git checkout install.sh recorded for
 # new commits on AGENT_UPDATE_BRANCH and tells the dashboard; the Update button
 # starts agent-update.service, a unit of its own (see bin/agent-update). 0
@@ -141,7 +147,7 @@ HEALTH_FILE = os.path.join(STATE, "health.json")    # "this build is up"
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-09-29.1"
+DAEMON_VERSION = "2026-10-02.1"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -2365,9 +2371,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             while not q.overflowed:
                 try:
-                    line = q.get(timeout=15)
+                    line = q.get(timeout=SSE_PING)
                 except queue.Empty:
-                    self.wfile.write(b": ping\n\n")
+                    self.wfile.write(b'data: {"type": "ping"}\n\n')
                     self.wfile.flush()
                     continue
                 try:
