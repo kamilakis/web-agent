@@ -133,6 +133,16 @@ has "$OUT" "kept True" "a rejected steer leaves another source's pending dispatc
 has "$OUT" "deadline True" "an extension's shorter timeout becomes the deadline"
 has "$OUT" "pi-closes True" "and when it passes the daemon does not answer for pi"
 
+echo "=== §23 the SSE keep-alive is an event the page can see, not a comment"
+reset_state
+AGENT_SSE_PING=1 FAKE_PI_SCENARIO=ok start_daemon
+sse_start
+sleep 2.5
+sse_stop
+has "$(cat "$ST/sse")" 'data: {"type": "ping"}' "pings arrive as data events"
+hasnt "$(cat "$ST/sse")" ": ping" "not as SSE comments, which page scripts never see"
+stop_daemon
+
 echo "=== the Matrix listener follows AGENT_SESSION_DIR"
 OUT=$(AGENT_SESSION_DIR="$ST/elsewhere" AGENT_MATRIX_STATE_DIR="$ST/mx" python3 - "$REPO/bin/agent-matrix-listener" <<'PY'
 import importlib.machinery, importlib.util, sys

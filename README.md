@@ -34,6 +34,13 @@ across surfaces.
     exact command and result behind a toggle, identical live and after a reload
   - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
   - model switcher, status dot, reconnect with snapshot re-render
+  - **stays live on a phone**: an iPhone web app that is locked or sent to the
+    background loses its stream and often resumes with a socket that looks
+    open but delivers nothing. The daemon pings every 15s as a real event; the
+    page reconnects after 40s without one, whenever it comes back into view,
+    and when the network returns — and every reconnect resyncs the transcript,
+    the status and any open question, even in the middle of a run (it used to
+    sit on "working…" until the next prompt)
   - **session history sidebar** — list, view, archive and create sessions;
     new sessions can be named at creation; beside the session name in the
     header, the pencil renames the live one and the archive icon archives it
@@ -389,6 +396,7 @@ nothing personal is baked in.
 | `AGENT_MATRIX_SENDERS` | *(empty)* | allowlist of Matrix senders; empty = anyone except the bot |
 | `AGENT_MATRIX_STATE_DIR` | `~/.local/state/agent-matrix-listener` | Matrix sync-token storage |
 | `AGENT_UI_TIMEOUT` / `AGENT_UI_NOUI_GRACE` | `90` / `15` | extension-question timeouts (see *Approval gate*) |
+| `AGENT_SSE_PING` | `15` | seconds between keep-alive events on the live stream (the page reconnects after 40s without one) |
 | `AGENT_PI_BIN` | *(found)* | the pi binary; default: next to the daemon, then PATH, then `~/.local/bin` |
 
 The dashboard also shows a **build badge** (top right): its own `UI_VERSION`

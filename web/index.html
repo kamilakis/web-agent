@@ -596,7 +596,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-09-29.1';
+const UI_VERSION = '2026-10-02.1';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -1948,6 +1948,7 @@ function onEvent(e) {
   let ev;
   try { ev = JSON.parse(e.data); } catch { return; }
   const t = ev.type;
+  if (t === 'ping') return;      // §23 keep-alive: counted by the watchdog, nothing to draw
   if (t === 'update_available' || t === 'update_started') {   // §22
     loadUpdate();
     return;
@@ -1993,6 +1994,9 @@ function onEvent(e) {
     maybeApplyChoices();   // §16: parse before resetStream eats the raw text
     setStatus(false); resetStream(); settleToolRows(); closeSteps();
     addWholeCopy(finished);
+    // §23 a resync in the middle of this run drew only what came after it;
+    // now that the run is over, draw it whole from the transcript.
+    if (resyncedMidRun) { resyncedMidRun = false; if (!viewing) refreshLive(); }
   } else if (t === 'message_start') {
     const m = ev.message || {};
     if (m.role === 'assistant') {
@@ -2083,19 +2087,67 @@ function renderAttachments(files) {
 }
 
 // ---- networking ----
+// §23 Staying live on a phone. An iPhone web app that is locked or sent to the
+// background loses its stream, and on resume often keeps a socket that looks
+// open but delivers nothing — so the page sat on "working…" while the answer
+// had long finished, until another prompt happened to wake the network up.
+// Three guards: the daemon pings every 15s as a real event and a watchdog
+// reconnects after SSE_STALE_MS without one; coming back into view always
+// reconnects; and every reconnect resyncs everything, mid-run included.
+const SSE_STALE_MS = 40000;
+let lastEventAt = Date.now();
+let hiddenAt = 0;
+let resyncedMidRun = false;   // a resync during a run drew only part of it
 function connectSSE() {
   es = new EventSource(eventsUrl);
-  es.onmessage = onEvent;
+  lastEventAt = Date.now();
+  es.onmessage = (e) => { lastEventAt = Date.now(); onEvent(e); };
   es.onopen = async () => {
+    lastEventAt = Date.now();
     if (!firstOpen) loadPendingUi();   // §21 events missed while disconnected
     if (!firstOpen) { checkNewBuild(); loadUpdate(); }   // §22 a restart = maybe a new build
-    if (!firstOpen && !working && !viewing) {
-      try { const msgs = await fetch('/messages', {headers:H}).then(r=>r.json()); renderSnapshot(msgs.messages || []); } catch {}
-    }
+    if (!firstOpen) await resyncLive();
     firstOpen = false;
   };
   es.onerror = () => setStatus('reconnecting…');
 }
+function reconnectSSE() {
+  try { if (es) es.close(); } catch {}
+  connectSSE();
+}
+// Everything a missed event could have changed: whether a run is going (the
+// missed agent_settled), and the transcript itself — even mid-run, which the
+// old code skipped, leaving the page "working…" with the answer missing.
+async function resyncLive() {
+  let streaming = working;
+  try {
+    const st = await fetch('/state', {headers: H}).then(r => r.json());
+    streaming = !!st.isStreaming;
+  } catch {}
+  setStatus(streaming);              // also clears "reconnecting…"
+  if (viewing) return;
+  try {
+    const msgs = await fetch('/messages', {headers: H}).then(r => r.json());
+    resetStream();
+    renderSnapshot(msgs.messages || []);
+  } catch {}
+  resyncedMidRun = streaming;
+}
+// The watchdog. EventSource.readyState 2 = CLOSED: iOS sometimes gives up for
+// good instead of retrying, and nothing else would ever reopen it.
+function sseWatchdog() {
+  if (document.visibilityState === 'hidden') return;
+  if (!es || es.readyState === 2 || Date.now() - lastEventAt > SSE_STALE_MS) reconnectSSE();
+}
+setInterval(sseWatchdog, 5000);
+// Back into view (unlock, app switch, a restored tab): don't trust the old socket.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+  if (hiddenAt && Date.now() - hiddenAt > 3000) reconnectSSE();
+  hiddenAt = 0;
+});
+window.addEventListener('pageshow', (e) => { if (e && e.persisted) reconnectSSE(); });
+window.addEventListener('online', () => reconnectSSE());
 
 // ---- image attach ----
 attachBtn.onclick = () => fileInput.click();

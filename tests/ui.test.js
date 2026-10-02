@@ -62,12 +62,17 @@ function newTab() {
   const routes = {};
   const posts = [];
   const confirms = [];   // what the user was asked, in order
+  const gets = [];       // every GET path, in order
+  const sources = [];    // every EventSource the page opened
+  const listeners = {};  // document + window event listeners, by type
+  const listen = (t, f) => { (listeners[t] = listeners[t] || []).push(f); };
+  const fire = (t, e = {}) => (listeners[t] || []).forEach(f => f(e));
   const document = {
     createElement: t => new Elem(t),
     createTextNode: t => { const e = new Elem('#text'); e.textContent = t; return e; },
     getElementById: id => (byId[id] = byId[id] || new Elem('div')),
     querySelector: () => null, querySelectorAll: () => [],
-    body: new Elem('body'), addEventListener() {},
+    body: new Elem('body'), addEventListener: listen, visibilityState: 'visible',
   };
   const ctx = {
     document, console, setTimeout, clearTimeout, setInterval, clearInterval,
@@ -76,13 +81,20 @@ function newTab() {
       const method = (opts.method || 'GET').toUpperCase();
       const p = String(url).split('?')[0];
       if (method === 'POST') posts.push({path: p, body: opts.body ? JSON.parse(opts.body) : null});
+      else gets.push(p);
       const route = routes[method + ' ' + p] !== undefined ? routes[method + ' ' + p] : routes[p];
       const r = typeof route === 'function' ? route() : route;
       const status = (r && r.status) || 200;
       const body = r === undefined ? {} : (r && 'json' in r ? r.json : r);
       return Promise.resolve({ok: status < 300, status, json: () => Promise.resolve(body)});
     },
-    EventSource: function () { return {addEventListener() {}, close() {}}; },
+    EventSource: function () {
+      const src = {readyState: 1, closed: false, addEventListener() {},
+                   close() { this.closed = true; this.readyState = 2; }};
+      sources.push(src);
+      return src;
+    },
+    addEventListener: listen,
     location: {origin: 'http://x', protocol: 'http:', host: 'x'},
     localStorage: {
       // A real store, so a dismissal can be shown to survive the next poll.
@@ -102,9 +114,11 @@ function newTab() {
   ctx.window = ctx; ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(js, ctx, {filename: 'index.html'});
-  return {ctx, byId, routes, posts, confirms};
+  return {ctx, byId, routes, posts, confirms, gets, sources, fire, document};
 }
 const tick = () => new Promise(r => setTimeout(r, 0));
+const allText = (node) => (node.textContent || '') + (node.innerHTML || '') +
+  (node.children || []).map(allText).join(' ');
 const find = (node, cls, acc = []) => {
   if ((node.className || '').split(/\s+/).includes(cls)) acc.push(node);
   (node.children || []).forEach(c => find(c, cls, acc));
@@ -801,6 +815,79 @@ console.log('=== snapshot reload: errored assistant message is visible');
   ok(/running the tests/.test(UG.byId['updateText'].textContent),
      "then shows the updater's own stages");
   vm.runInContext('clearInterval(updatePoll)', UG.ctx);
+
+  console.log('=== §23 the iPhone silence: a reconnect after a missed agent_settled');
+  const S1 = newTab();
+  Object.assign(S1.routes, BASE_ROUTES({...stateD, isStreaming: false}));
+  await tick(); await tick(); await tick();
+  const es1 = vm.runInContext('es', S1.ctx);
+  await es1.onopen();                                   // the first open
+  es1.onmessage({data: JSON.stringify({type: 'agent_start'})});
+  ok(S1.byId['statusText'].textContent === 'working…', 'a run starts: working…');
+  es1.onerror();                                        // the phone locks; the stream dies
+  // ...meanwhile the run finishes on the box, and the page never hears it.
+  S1.routes['/messages'] = {messages: [
+    {role: 'user', content: [{type: 'text', text: 'what is the balance?'}]},
+    {role: 'assistant', content: [{type: 'text', text: 'The balance is 60 euro.'}], stopReason: 'stop'}]};
+  await es1.onopen(); await tick(); await tick();       // back: the stream reopens
+  ok(/The balance is 60 euro/.test(allText(S1.byId['log'])),
+     'the finished answer is drawn, though the page was "working" when it dropped');
+  ok(S1.byId['statusText'].textContent === '', 'and it is no longer stuck on working… or reconnecting…');
+  ok(S1.byId['stopBtn'].hidden === true && S1.byId['sendBtn'].hidden === false,
+     'Send is back, Stop is gone');
+
+  console.log('=== §23 a resync in the middle of a run redraws it whole when it ends');
+  const S2 = newTab();
+  Object.assign(S2.routes, BASE_ROUTES({...stateD, isStreaming: true}));
+  await tick(); await tick(); await tick();
+  const es2 = vm.runInContext('es', S2.ctx);
+  await es2.onopen();
+  await es2.onopen(); await tick();                     // a reconnect while the run is going
+  ok(S2.byId['statusText'].textContent === 'working…', 'still working, as /state says');
+  const before = S2.gets.filter(g => g === '/messages').length;
+  es2.onmessage({data: JSON.stringify({type: 'agent_settled'})});
+  await tick(); await tick();
+  ok(S2.gets.filter(g => g === '/messages').length === before + 1,
+     'agent_settled re-reads the transcript once, to draw the run whole');
+
+  console.log('=== §23 the watchdog: pings keep it quiet, silence reconnects');
+  const S3 = newTab();
+  Object.assign(S3.routes, BASE_ROUTES(stateD));
+  await tick(); await tick(); await tick();
+  const n0 = S3.sources.length;
+  const es3 = vm.runInContext('es', S3.ctx);
+  es3.onmessage({data: JSON.stringify({type: 'ping'})});
+  vm.runInContext('sseWatchdog()', S3.ctx);
+  ok(S3.sources.length === n0, 'a fresh ping: no reconnect');
+  ok(!S3.byId['log'].innerHTML.includes('ping'), 'and a ping draws nothing');
+  vm.runInContext('lastEventAt = Date.now() - 60000', S3.ctx);
+  vm.runInContext('sseWatchdog()', S3.ctx);
+  ok(S3.sources.length === n0 + 1 && es3.closed, '60s of silence: the old stream is closed and a new one opened');
+  const es3b = vm.runInContext('es', S3.ctx);
+  es3b.readyState = 2;                                  // iOS gave up for good
+  vm.runInContext('sseWatchdog()', S3.ctx);
+  ok(S3.sources.length === n0 + 2, 'a stream iOS closed for good is reopened too');
+  S3.document.visibilityState = 'hidden';
+  vm.runInContext('lastEventAt = Date.now() - 60000', S3.ctx);
+  vm.runInContext('sseWatchdog()', S3.ctx);
+  ok(S3.sources.length === n0 + 2, 'but not while the page is hidden (no reconnect storm in the background)');
+
+  console.log('=== §23 coming back into view reconnects');
+  const S4 = newTab();
+  Object.assign(S4.routes, BASE_ROUTES(stateD));
+  await tick(); await tick(); await tick();
+  const m0 = S4.sources.length;
+  S4.document.visibilityState = 'hidden'; S4.fire('visibilitychange');
+  vm.runInContext('hiddenAt = Date.now() - 10000', S4.ctx);   // locked for 10s
+  S4.document.visibilityState = 'visible'; S4.fire('visibilitychange');
+  ok(S4.sources.length === m0 + 1, 'unlocking after a while opens a fresh stream');
+  S4.document.visibilityState = 'hidden'; S4.fire('visibilitychange');
+  S4.document.visibilityState = 'visible'; S4.fire('visibilitychange');
+  ok(S4.sources.length === m0 + 1, 'a blink (under 3s) does not');
+  S4.fire('pageshow', {persisted: true});
+  ok(S4.sources.length === m0 + 2, 'a page restored from the back/forward cache does');
+  S4.fire('online');
+  ok(S4.sources.length === m0 + 3, 'and so does the network coming back');
 
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
