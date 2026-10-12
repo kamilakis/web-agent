@@ -235,6 +235,23 @@ header .build {
   opacity:.7; white-space:nowrap;
 }
 header .build:active { opacity:1; }
+/* §24 the gate switch. Sits with the model, because both answer "what will the
+   agent do if I let it run" -- and goes red when the answer is "anything". */
+header .gate {
+  flex:0 0 auto; cursor:pointer; display:flex; align-items:center; gap:4px;
+  background:var(--surface); color:var(--dim);
+  border:1px solid var(--border); border-radius:999px;
+  padding:5px 10px; font:500 12px/1 var(--sans); white-space:nowrap;
+}
+header .gate .gateWord { opacity:.7; }
+header .gate[aria-checked="false"] {
+  background:var(--danger); border-color:var(--danger); color:#fff; font-weight:600;
+}
+header .gate[aria-checked="false"] .gateWord { opacity:.85; }
+header .gate:disabled { cursor:default; opacity:.6; }
+/* On a phone the header already carries toggle, name, status and model, so the
+   word is the first thing to go: "on"/"off" plus the colour still reads. */
+@media (max-width:560px) { header .gate .gateWord { display:none; } }
 /* On a phone the header is already toggle + mark + name + status + model, so
    the commit step is desktop-only (it is in the tap toast either way). */
 @media (max-width:560px) { header .build .commit { display:none; } }
@@ -545,6 +562,12 @@ footer {
   <div class="spacer"></div>
   <div class="status"><span class="dot warn" id="statusDot"></span><span id="statusText">connecting…</span></div>
   <select id="modelSel" title="model" aria-label="model"></select>
+  <!-- §24 the approval gate. On is the quiet default; OFF is red on purpose --
+       an agent that has stopped asking before it changes things should be
+       visible from across the room, not a checkbox nobody looks at. -->
+  <button id="gateBtn" class="gate" type="button" role="switch" aria-checked="true" title="Approval gate">
+    <span class="gateWord">Gate</span><span id="gateState">on</span>
+  </button>
   <button id="buildBadge" class="build" type="button" title="build"></button>
 </header>
 <div id="updateBar" hidden>
@@ -596,7 +619,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-10-02.1';
+const UI_VERSION = '2026-10-12.1';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -856,6 +879,7 @@ async function refreshHeader() {
   } catch {}
   loadBuild();
   loadUsage();     // a switch can change the model (and the balance behind it)
+  loadGate();      // §24 another phone may have moved it since this page loaded
 }
 
 // The build badge (top right). "Keep versioning" is only useful if the running
@@ -892,6 +916,76 @@ function renderBuildBadge() {
   buildBadge.title = bits.join(' · ');
 }
 buildBadge.onclick = () => sbMsg(buildBadge.title, 8000);
+
+// ---- §24 the approval-gate switch -----------------------------------------
+// The gate is enforced by the approval-gate pi extension, which lives in the pi
+// process; this page and that extension are different programs. They agree
+// through $STATE/gate.json — the daemon's /gate reads and writes it, and the
+// extension re-reads it before every gated call. So the switch is never
+// mirrored in page state: what is drawn is what the daemon just told us.
+const gateBtn = document.getElementById('gateBtn');
+const gateState = document.getElementById('gateState');
+let gateInfo = null;
+
+function gateIsOn() {
+  // Unknown (an older daemon with no /gate) counts as armed: the extension's
+  // own default is armed, so claiming "off" would be the dangerous guess.
+  return !gateInfo || gateInfo.enabled !== false;
+}
+
+function renderGate() {
+  const on = gateIsOn();
+  gateBtn.setAttribute('aria-checked', on ? 'true' : 'false');
+  gateState.textContent = on ? 'on' : 'off';
+  gateBtn.title = on
+    ? 'Approval gate: on \u2014 the agent asks before it changes anything'
+    : 'Approval gate: OFF \u2014 the agent runs mutating commands without asking. Tap to re-arm.';
+}
+
+async function loadGate() {
+  try {
+    const r = await fetch('/gate', {headers: H});
+    if (r.status === 404) {
+      // A daemon older than this page. Offer no switch at all rather than one
+      // whose every tap fails: the build badge already explains the mismatch.
+      gateInfo = null;
+      gateBtn.hidden = true;
+      return;
+    }
+    gateInfo = await r.json();
+    gateBtn.hidden = false;
+    renderGate();
+  } catch {
+    // Unreachable, not absent: leave the switch as it stands. The status dot is
+    // already reporting the outage, and one that vanished on every blip would
+    // be worse than one that is briefly stale.
+  }
+}
+
+gateBtn.onclick = async () => {
+  // Ask for the position we want, never, "toggle": two open tabs each sending a
+  // toggle would land somewhere neither of them picked.
+  const want = !gateIsOn();
+  gateBtn.disabled = true;
+  try {
+    const r = await fetch('/gate', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'}, H),
+      body: JSON.stringify({enabled: want}),
+    });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    gateInfo = res;
+    renderGate();
+    sbMsg(want ? 'approval gate on \u2014 mutating commands ask again'
+               : '\u26a0\ufe0f approval gate OFF \u2014 mutating commands run without asking', 6000);
+  } catch (e) {
+    sbMsg('could not move the gate switch: ' + e.message, 6000);
+    loadGate();          // the page must not show a position that is not real
+  } finally {
+    gateBtn.disabled = false;
+  }
+};
 
 // ---- §22 self-update ----
 // The daemon checks its git checkout for new commits (GET /update); Update
@@ -1957,6 +2051,13 @@ function onEvent(e) {
     enqueueUi(ev);
     return;
   }
+  if (t === 'gate') {            // §24 moved by another tab, or by `/gate` in chat
+    gateInfo = {enabled: ev.enabled, at: ev.at, source: ev.source};
+    gateBtn.hidden = false;
+    renderGate();
+    if (ev.enabled === false) sbMsg('\u26a0\ufe0f approval gate switched OFF', 6000);
+    return;
+  }
   if (t === 'ui_resolved') {
     if (dropUi(ev.id) && ev.why) sbMsg(ev.method + ': ' + ev.why);
     return;
@@ -2105,6 +2206,7 @@ function connectSSE() {
   es.onopen = async () => {
     lastEventAt = Date.now();
     if (!firstOpen) loadPendingUi();   // §21 events missed while disconnected
+    if (!firstOpen) loadGate();        // §24 and a switch moved while away
     if (!firstOpen) { checkNewBuild(); loadUpdate(); }   // §22 a restart = maybe a new build
     if (!firstOpen) await resyncLive();
     firstOpen = false;
@@ -2264,6 +2366,7 @@ console.info('[web-agent] dashboard ui ' + UI_VERSION);
   connectSSE();
   loadSessions();
   loadUsage();
+  loadGate();
   loadPendingUi();
   setInterval(loadUsage, 60000);   // the daemon caches; this is a local read
   await checkNewBuild();           // records the build this page came from

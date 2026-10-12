@@ -889,6 +889,83 @@ console.log('=== snapshot reload: errored assistant message is visible');
   S4.fire('online');
   ok(S4.sources.length === m0 + 3, 'and so does the network coming back');
 
+  // ===== §24 the approval-gate switch =======================================
+  console.log('=== the gate switch follows the daemon, and a tap states its position');
+  {
+    const state = {sessionName: 'x', model: null, isStreaming: false};
+    const tab = newTab();
+    Object.assign(tab.routes, BASE_ROUTES(state));
+    let gate = {enabled: true, at: 1, source: 'dashboard'};
+    tab.routes['/gate'] = () => ({json: gate});
+    await tick(); await tick(); await tick();
+    ok(tab.byId['gateState'].textContent === 'on', 'an armed gate reads "on"');
+    ok(tab.byId['gateBtn'].hidden === false, 'and the switch is offered');
+
+    // Two tabs each sending "toggle" would land somewhere neither asked for, so
+    // the page states the position it wants. Mutation-test: a toggle here would
+    // still pass the first assertion below, which is why the second one exists.
+    gate = {enabled: false, at: 2, source: 'dashboard'};
+    await tab.byId['gateBtn'].onclick();
+    const sent = tab.posts.filter(p => p.path === '/gate').pop();
+    ok(sent && sent.body && sent.body.enabled === false,
+       'a tap sends {"enabled": false}, not a toggle (got ' + JSON.stringify(sent && sent.body) + ')');
+    ok(tab.byId['gateState'].textContent === 'off', 'and the switch draws off');
+
+    gate = {enabled: true, at: 3, source: 'dashboard'};
+    await tab.byId['gateBtn'].onclick();
+    const back = tab.posts.filter(p => p.path === '/gate').pop();
+    ok(back && back.body && back.body.enabled === true, 'tapping again asks for on');
+    ok(tab.byId['gateState'].textContent === 'on', 'and draws on');
+  }
+
+  console.log('=== a failed tap does not leave the page showing a position that is not real');
+  {
+    const state = {sessionName: 'x', model: null, isStreaming: false};
+    const tab = newTab();
+    Object.assign(tab.routes, BASE_ROUTES(state));
+    tab.routes['/gate'] = () => ({status: 500, json: {error: 'boom'}});
+    await tick(); await tick(); await tick();
+    await tab.byId['gateBtn'].onclick();
+    // /gate answers 500 for both the reload and the failed tap, so it stays on.
+    ok(tab.byId['gateState'].textContent === 'on',
+       'the page re-reads the switch instead of showing the position it hoped for');
+    ok(tab.byId['sbNote'].textContent.includes('gate'),
+       'and says the switch could not be moved (got "' + tab.byId['sbNote'].textContent + '")');
+  }
+
+  console.log('=== an older daemon offers no switch at all');
+  {
+    const state = {sessionName: 'x', model: null, isStreaming: false};
+    const tab = newTab();
+    Object.assign(tab.routes, BASE_ROUTES(state));
+    tab.routes['/gate'] = () => ({status: 404, json: {error: 'not found'}});
+    await tick(); await tick(); await tick();
+    ok(tab.byId['gateBtn'].hidden === true,
+       '404 hides the switch rather than offering a button whose every tap fails');
+  }
+
+  console.log('=== another tab moving the switch updates this one, live');
+  {
+    const state = {sessionName: 'x', model: null, isStreaming: false};
+    const tab = newTab();
+    Object.assign(tab.routes, BASE_ROUTES(state));
+    tab.routes['/gate'] = () => ({json: {enabled: true, at: 1, source: 'dashboard'}});
+    await tick(); await tick(); await tick();
+    ok(tab.byId['gateState'].textContent === 'on', 'starts armed');
+
+    tab.ctx.onEvent({data: JSON.stringify({type: 'gate', enabled: false, source: 'dashboard'})});
+    ok(tab.byId['gateState'].textContent === 'off', 'the event turns it off');
+    tab.ctx.onEvent({data: JSON.stringify({type: 'gate', enabled: true, source: 'command'})});
+    ok(tab.byId['gateState'].textContent === 'on', 'and back on');
+
+    // The switch must still move while a past session is open: §24 sits above
+    // the "viewing" guard in onEvent for exactly this reason.
+    vm.runInContext('viewing = {file:"old.jsonl", dir:"archive", title:"Old"}', tab.ctx);
+    tab.ctx.onEvent({data: JSON.stringify({type: 'gate', enabled: false, source: 'dashboard'})});
+    ok(tab.byId['gateState'].textContent === 'off',
+       'and still moves while a past session is being read');
+  }
+
   console.log();
   if (fails) { console.log(fails + ' FAILURES'); process.exit(1); }
   console.log('ALL PASS');

@@ -57,6 +57,8 @@ across surfaces.
     the prompt, so the agent edits them with ffmpeg; results render inline
   - **interactive choices**: the agent can end a reply with a `choose` block
     that renders as tappable buttons
+  - **the gate switch**: on/off for the approval gate, in the header beside the
+    model. Off is red on purpose — mutating commands then run without asking
   - **failures are loud**: a run that ends in a provider/runtime error
     (`stopReason: "error"`) renders as an error block in the transcript — live
     and after a reload — is logged as `status: error` in the task log, and is
@@ -312,11 +314,34 @@ redirection anywhere makes it a write (`echo hi > f` asks). A wrong *ask* costs
 one tap; a wrong *allow* changes something nobody agreed to, so unknown
 commands always ask. The reasoning is shown in the dialog (`why ask: …`).
 
-Approval choices: **Allow once**, **Allow for this session** (in-memory, resets
-on restart), **Deny**, and **Deny, but instead…** — the last one hands your typed
-instruction back to the agent as the block reason, so it can correct course.
-`/gate on|off|status|forget` controls it; `/gate forget` clears the session
-allow-list.
+Approval choices: **Allow once**, **Allow for this session** (recorded in the
+session itself, so it survives a `/reload`, a daemon restart and a pi upgrade —
+and stays with the session it was granted in), **Deny**, and **Deny, but
+instead…** — the last one hands your typed instruction back to the agent as the
+block reason, so it can correct course. `/gate on|off|status|forget` controls
+it; `/gate forget` clears the session allow-list.
+
+**In the dashboard** the gate has a switch in the header, next to the model
+switcher: `Gate on` / `Gate off`, red when off. It is the same switch as
+`/gate on|off`, not a second one — the extension and the daemon are different
+processes, so both read and write `$AGENT_SESSION_DIR/gate.json` (override with
+`AGENT_GATE_FILE`). The file is what makes the switch honest: it survives a
+daemon restart, and the extension re-reads it before every gated call, so a tap
+on a phone reaches a tool call that is already in flight. A `/gate off` typed
+into the conversation shows up on the switch too, within a few seconds.
+
+Turning it off is a real change in what the agent may do unattended, so it is
+reported rather than silent: the switch goes red, every open dashboard is told
+over the live stream, and a notice is posted to Matrix (a gate that was left off
+and then never asked again is exactly the thing you would want to hear about).
+It **stays off across restarts** — a switch that silently re-armed would be a
+lie about the agent's permissions.
+
+It fails safe in both directions: only an explicit, parseable
+`{"enabled": false}` disarms the gate. A missing file, an empty or truncated
+one, non-JSON, a missing key, the string `"false"` and `null` all leave it
+**armed**, and deleting the file re-arms it — no filesystem accident can quietly
+turn the agent loose.
 
 **In the dashboard** a question appears as a modal with a button per option, so
 it reaches you wherever you are — phones included — instead of waiting on a
@@ -335,10 +360,13 @@ denial, so it never narrates a decision you did not make.
 |---|---|---|
 | `AGENT_UI_TIMEOUT` | `90` | seconds an extension question waits for an answer |
 | `AGENT_UI_NOUI_GRACE` | `15` | seconds to wait for a dashboard to appear before cancelling |
+| `AGENT_GATE_FILE` | `$AGENT_SESSION_DIR/gate.json` | the approval-gate switch the dashboard and the extension share |
 
 `tests/ui-relay.test.sh` covers the round trip (select, confirm, input, cancel,
-timeout, no-UI); `classify.test.mjs` next to the extension holds the 123-case
-classification table.
+timeout, no-UI); `tests/gate.test.sh` covers the switch (the endpoint, the
+restart, the broadcast, the token, and every input that must NOT read as *off*);
+`classify.test.mjs` next to the extension holds the 123-case classification
+table, and `index.test.mjs` the switch as the extension sees it.
 
 ## Tests
 

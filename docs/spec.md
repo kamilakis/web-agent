@@ -1506,3 +1506,105 @@ call was blocked and NOTHING was run; the question was dismissed or timed out.*
 The default `AGENT_UI_TIMEOUT` drops 180s → 90s, and the question now carries
 its `deadline`, which the dashboard renders as a live countdown — a dialog that
 vanishes mid-tap is worse than one that says how long is left.
+
+## 24. The gate switch (built 2026-10-12)
+
+The approval gate had exactly one control, and it was the wrong kind. To stop it
+asking, you typed `/gate off` **into the conversation** — a control-plane action
+smuggled through the chat channel, which meant the only way to change what the
+agent was allowed to do was to say something to the agent. And `enabled` was a
+local in the extension, so it silently re-armed on every daemon restart: a
+switch that resets itself is worse than no switch, because you stop checking.
+
+### 24.1 The file is the switch
+
+The gate is enforced by the approval-gate pi extension, which lives in the pi
+process. The switch is drawn by the daemon, which does not. They are different
+programs, started and restarted independently, so neither can hold the state:
+the daemon can restart without pi, and pi can restart (a `/reload`, an upgrade)
+without the daemon. They agree through **one file**:
+
+```
+$AGENT_SESSION_DIR/gate.json      overridable with AGENT_GATE_FILE
+{"enabled": false, "at": 1760000000.0, "source": "dashboard"}
+```
+
+- The **daemon** reads it for `GET /gate`, writes it on `POST /gate`, and is the
+  only side that broadcasts. The caller states the position it wants
+  (`{"enabled": false}`), never `toggle`; two open tabs each sending a toggle
+  would land on a state neither of them picked.
+- The **extension** re-reads it before every gated call — one small `readFileSync`
+  next to the tool call it guards, compared against the exact text it last acted
+  on, so a no-op costs a read and nothing else. mtime is deliberately *not* the
+  change signal: off→on within one millisecond has the same mtime and the same
+  length, and the failure mode of that race is a gate that stays off.
+- The **janitor** polls the same file every `AGENT_JANITOR_INTERVAL` (15s) and
+  broadcasts when it differs from what clients were last told, which is how a
+  `/gate off` typed into the chat reaches the switch on screen.
+
+The tap path is live (the daemon broadcasts in the same request); the command
+path is within one janitor tick.
+
+### 24.2 Fail safe, in the direction that matters
+
+"Off" means an unattended agent stops asking before it changes things, so the
+only acceptable failure is *staying armed*. `read_gate()` and `refreshGate()`
+both require an explicit, parseable `{"enabled": false}`. Everything else leaves
+the gate armed:
+
+| input | reads as |
+|---|---|
+| no file at all | **armed** |
+| empty file | **armed** |
+| truncated write (`{"enabled": fal`) | **armed** |
+| not JSON | **armed** |
+| `{}` — no key | **armed** |
+| `{"enabled": "false"}` — the string | **armed** |
+| `{"enabled": null}` / `{"enabled": 0}` | **armed** |
+| the file is deleted after being read | **armed** (re-armed, not sticky) |
+
+`d.get("enabled") is not False` and `parsed.enabled === false` are identity
+comparisons for a reason: truthiness would let `"false"`, `0` and `null` disarm
+the gate, and a truncated JSON write is a real thing that happens when a disk
+fills up.
+
+### 24.3 What the switch does and does not do
+
+Turning it off is a genuine change in what the agent may do unattended, so it is
+not silent: the switch goes red (`aria-checked="false"`), every open dashboard
+is told over SSE, and a notice is posted to Matrix — the switch can be moved
+from a pocket, and "nothing will ask again" is exactly the thing worth a
+message. The Matrix post runs on a thread so it can never delay the tap's HTTP
+response.
+
+It **persists across restarts**, deliberately. That is the one real trade this
+section makes: a daemon restart no longer re-arms the gate. It is the honest
+reading of a switch, the dashboard says so in red, and the boot state is visible
+on every page and in `/gate` — but it does mean a gate left off stays off.
+
+### 24.4 The page does not invent a position
+
+`loadGate()` never mirrors the switch in page state: what is drawn is what the
+endpoint just returned. Three cases matter:
+
+- **Older daemon (404 on `/gate`)** — the switch is *hidden*. The build badge is
+  already saying the page is ahead of the daemon; offering a button whose every
+  tap 404s is worse than offering none.
+- **A tap that fails** — the page re-reads rather than keeping the position it
+  hoped for, and says so. A switch showing "off" while the gate is armed is the
+  failure that matters, because it is the reassuring direction.
+- **A reconnect** — `es.onopen` reloads the gate with everything else it missed.
+
+### 24.5 Tests
+
+`tests/gate.test.sh` (37 checks) covers the endpoint, the restart, the atomic
+write, the `"source"` attribution, the 400 for a request that states nothing,
+the token, the janitor broadcast, the no-repeat-when-unchanged case, and all
+nine fail-safe inputs above. `tests/ui.test.js` adds the page's half: the switch
+renders the daemon's state, a tap sends `{"enabled": …}` and not a toggle, a
+failed tap re-reads and reports, an older daemon hides the button, an SSE `gate`
+event moves the switch live — including while a past session is open, which is
+the reason the `gate` case sits **above** the `viewing` guard in `onEvent`.
+`index.test.mjs` (64 checks) covers the extension's half, and redirects
+`AGENT_GATE_FILE` to scratch space at the top — a unit test for a switch that is
+a real file must never reach in and disarm the live agent.

@@ -142,12 +142,17 @@ UPDATE_CMD = os.environ.get(
     "AGENT_UPDATE_CMD", "systemctl --user start --no-block agent-update.service")
 UPDATE_FILE = os.path.join(STATE, "update.json")    # the updater's progress
 HEALTH_FILE = os.path.join(STATE, "health.json")    # "this build is up"
+# §24 the approval-gate on/off switch. This file is the single source of truth
+# because the two sides live in different processes: the approval-gate pi
+# extension enforces it, and this daemon draws it as a switch on the dashboard.
+# Either may restart first, so neither can hold the state in memory.
+GATE_FILE = os.path.join(STATE, "gate.json")
 
 # What this build is. Bump DAEMON_VERSION with every daemon change: the
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-10-02.1"
+DAEMON_VERSION = "2026-10-12.1"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -432,6 +437,35 @@ def _write_json(path, obj):
     os.replace(tmp, path)
 
 
+def read_gate():
+    """§24 the approval-gate switch, as the dashboard renders it.
+
+    Fail safe in the same direction as the extension that enforces it: only an
+    explicit {"enabled": false} reads as off. No file, a truncated write or
+    anything unparseable leaves the gate ARMED, so no filesystem accident can
+    quietly turn an unattended agent loose.
+    """
+    d = _read_json(GATE_FILE) or {}
+    return {
+        "enabled": d.get("enabled") is not False,
+        "at": d.get("at"),
+        "source": d.get("source"),
+        "file": GATE_FILE,
+    }
+
+
+def write_gate(enabled, source="dashboard"):
+    """Move the switch and persist it.
+
+    The caller passes the state it wants rather than asking for a toggle, so
+    two phones that both tap cannot land on a position neither asked for.
+    """
+    obj = {"enabled": bool(enabled), "at": time.time(), "source": source}
+    _write_json(GATE_FILE, obj)
+    return {"enabled": obj["enabled"], "at": obj["at"], "source": obj["source"],
+            "file": GATE_FILE}
+
+
 def _git(repo, *args, timeout=30):
     """Run git in the checkout; (ok, stdout). Never prompts for credentials."""
     try:
@@ -544,6 +578,7 @@ class Daemon:
         self.last_aborted = False       # the run was stopped (abort), not finished
         self.last_web_message = None    # last web prompt (for steer-turned-run case)
         self.last_web_asked = None
+        self.gate_seen = read_gate()["enabled"]   # §24 last switch position broadcast
         self.model_input = None         # current model's input types (None = unknown)
         self.usage = None               # §20 usage/balance snapshot for /usage
         self.ui_pending = {}            # §21 extension dialogs awaiting an answer
@@ -1569,6 +1604,48 @@ class Daemon:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         log("web dashboard on http://%s:%d" % (WEB_HOST, WEB_PORT))
 
+    # ---- §24 the approval-gate switch --------------------------------
+    def set_gate(self, enabled, source="dashboard"):
+        """Move the approval-gate switch: persist it, tell every open dashboard,
+        and say so in Matrix.
+
+        An agent that has stopped asking before it changes things is worth a
+        message rather than a colour change on one phone — the switch can be
+        moved from a pocket and then nothing asks again for a week.
+        """
+        before = read_gate()["enabled"]
+        now = write_gate(enabled, source)
+        log("GATE ->", "on" if now["enabled"] else "off", "source=", source)
+        self.gate_seen = now["enabled"]
+        if before == now["enabled"]:
+            return now                 # already there: nothing changed, nothing to say
+        self.broadcast({"type": "gate", "enabled": now["enabled"],
+                        "source": source, "at": now["at"]})
+        notice = ("\u26a0\ufe0f Approval gate is now OFF \u2014 the agent will run "
+                  "mutating commands without asking." if not now["enabled"] else
+                  "Approval gate is back ON \u2014 mutating commands ask again.")
+        # post_matrix shells out to matrix-notify and can take seconds; the
+        # switch's HTTP response must never wait on Matrix.
+        threading.Thread(target=post_matrix, args=(notice,), daemon=True).start()
+        return now
+
+    def sync_gate(self):
+        """Notice a switch moved by `/gate` rather than by a tap.
+
+        The extension writes the same file, so without this the dashboard would
+        sit showing "on" after someone typed `/gate off` into the conversation.
+        Polled by the janitor: a few seconds of lag on the command path is fine,
+        because the tap path broadcasts immediately.
+        """
+        info = read_gate()
+        if info["enabled"] == self.gate_seen:
+            return
+        self.gate_seen = info["enabled"]
+        log("GATE ->", "on" if info["enabled"] else "off",
+            "source=", info.get("source"))
+        self.broadcast({"type": "gate", "enabled": info["enabled"],
+                        "source": info.get("source"), "at": info.get("at")})
+
     def janitor(self):
         """Periodically re-check dispatch, so a stuck pending guard heals on
         its own instead of waiting for the next FIFO prompt. Also ages out the
@@ -1584,6 +1661,10 @@ class Daemon:
                 self.purge_trash()
             except Exception as e:
                 log("trash purge error:", e)
+            try:
+                self.sync_gate()
+            except Exception as e:
+                log("gate sync error:", e)
 
     # ---- usage (transcript totals + an optional account balance) ------
     def _day_start(self):
@@ -2188,6 +2269,8 @@ class Handler(BaseHTTPRequestHandler):
             self._session_read(qs)
         elif path == "/models":
             self._command({"type": "get_available_models"})
+        elif path == "/gate":
+            self._json(read_gate())
         elif path.startswith("/media/"):
             self._media(urllib.parse.unquote(path[len("/media/"):]))
         else:
@@ -2227,6 +2310,16 @@ class Handler(BaseHTTPRequestHandler):
             Handler.d.send_cmd({"type": "clear_queue"})
             Handler.d.send_cmd({"type": "abort"})
             self._json({"status": "aborting"})
+        elif path == "/gate":
+            # The caller states the position it wants; `toggle` is a
+            # deliberate second option for a physical-style switch, but the
+            # dashboard always sends `enabled` so two open tabs cannot fight.
+            if "enabled" in body:
+                self._json(Handler.d.set_gate(bool(body["enabled"])))
+            elif body.get("toggle"):
+                self._json(Handler.d.set_gate(not read_gate()["enabled"]))
+            else:
+                self._json({"error": "enabled required"}, 400)
         elif path == "/model":
             try:
                 resp = Handler.d.model_set(body.get("provider"), body.get("modelId"))
