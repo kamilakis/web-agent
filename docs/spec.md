@@ -1608,3 +1608,43 @@ the reason the `gate` case sits **above** the `viewing` guard in `onEvent`.
 `index.test.mjs` (64 checks) covers the extension's half, and redirects
 `AGENT_GATE_FILE` to scratch space at the top — a unit test for a switch that is
 a real file must never reach in and disarm the live agent.
+
+### 24.7 Version badge (built 2026-10-12)
+
+The page embeds a UI build id; `/version` returns the daemon's. On load, a
+mismatch shows `⚠ stale page` under the header (the new daemon may have
+endpoints the old page can't use — the gate switch itself is the first case).
+A matching build pair shows nothing, and the badge clears on the next load
+after both halves of an update have been reloaded. `agent-session-install.sh`
+refuses to mix a new page with an old running daemon unless `NO_RESTART=1` is
+set, and it never restarts a daemon whose pi child is an active session
+without the same opt-in.
+
+## §25 The model dropdown follows the agent, and shows names
+
+The dropdown is the page's only model control, and before this it learned the
+current model only on load and on session switch. A switch made anywhere else
+— `curl`, the photo auto-switch (§2), the `AGENT_MODEL` a restart lands on
+(§2.4) — left every open tab showing the model the agent stopped being. It now:
+
+- `model_set()` broadcasts `model_changed {model: {provider, id}}` after every
+  accepted switch — the same explicit-state pattern as `gate` (§24). The
+  payload is the provider and id the switch *asked for*, not the response's
+  shape, which differs between pi versions (flat model vs `{"model": …}`).
+- The page applies the event with the existing `applyModelToSelect()` (the B2
+  path), and it sits above the "viewing a past session" guard for the same
+  reason as the gate event: it is about the agent, not the transcript being
+  read.
+- The dropdown offers each model by its `name`, not its id. The id is the wire
+  name the model server expects, and for a model that is not the provider's
+  own (`Qwen/Qwen3.8-27B` on Hetzner's experimental endpoint) it says nothing
+  about who runs it — the name does (`Qwen3.8 27B (Hetzner)`). The id is kept
+  as the option's hover title so it is one second away when it matters.
+  `applyModelToSelect`'s fallback option is labelled the same way, so a
+  `model_changed` for a model the dropdown never saw is added under its name.
+
+`tests/model-switch.test.sh` (9 checks) covers the endpoint, the state
+follow, and the broadcast content; `tests/ui.test.js` covers the page's half:
+named options, the wire id as hover title, a `model_changed` moving the
+selection live — including while a past session is open — and an unknown model
+arriving under its name.

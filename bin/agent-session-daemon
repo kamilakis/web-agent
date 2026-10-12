@@ -152,7 +152,7 @@ GATE_FILE = os.path.join(STATE, "gate.json")
 # dashboard shows it next to its own UI_VERSION, so a page running against a
 # stale daemon (which is how "resume needs a daemon restart" happens) is
 # visible instead of guessed at. install.sh records the git commit alongside.
-DAEMON_VERSION = "2026-10-12.1"
+DAEMON_VERSION = "2026-10-12.2"
 BUILD_FILE = os.path.join(STATE, "build.json")
 MAX_PROMPT_ATTEMPTS = int(os.environ.get("AGENT_MAX_PROMPT_ATTEMPTS", "3"))
 
@@ -1247,6 +1247,16 @@ class Daemon:
             "type": "set_model", "provider": provider, "modelId": model_id,
         })
         self._refresh_model_input()
+        # Tell every dashboard which model the agent is actually on. A switch
+        # made anywhere but this page — the photo auto-switch, a curl, the
+        # AGENT_MODEL a restart lands on — would otherwise leave every open
+        # tab's dropdown on the model the agent stopped being. The payload is
+        # the provider and id we asked for, not the response's shape, which
+        # differs between pi versions (flat model vs {"model": …}); the page
+        # only needs those two keys.
+        if resp.get("success") is not False:
+            self.broadcast({"type": "model_changed",
+                            "model": {"provider": provider, "id": model_id}})
         return resp
 
     def on_prompt_rejected(self, rid, err=None):

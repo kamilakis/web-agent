@@ -57,9 +57,14 @@ class Elem {
 }
 
 // One dashboard tab: its own DOM, its own routes, its own page instance.
-function newTab() {
+function newTab(initialRoutes) {
   const byId = {};
-  const routes = {};
+  // init() is an IIFE that runs during this very evaluation, and the fake
+  // fetch() consults the routes at call time — so anything init reads must
+  // already be here. Tabs that test post-init behaviour set routes after the
+  // fact, as before; for them init simply sees an empty server, as it did
+  // before this parameter existed.
+  const routes = Object.assign({}, initialRoutes);
   const posts = [];
   const confirms = [];   // what the user was asked, in order
   const gets = [];       // every GET path, in order
@@ -964,6 +969,51 @@ console.log('=== snapshot reload: errored assistant message is visible');
     tab.ctx.onEvent({data: JSON.stringify({type: 'gate', enabled: false, source: 'dashboard'})});
     ok(tab.byId['gateState'].textContent === 'off',
        'and still moves while a past session is being read');
+  }
+
+  // ===== §25 the model dropdown follows the agent =========================
+  console.log('=== the dropdown shows names, and a switch from elsewhere syncs it');
+  {
+    const state = {sessionName: 'x', model: {provider: 'deepseek', id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash'}, isStreaming: false};
+    const tab = newTab({
+      ...BASE_ROUTES(state),
+      '/models': {models: [
+        {provider: 'deepseek', id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash'},
+        {provider: 'hetzner', id: 'Qwen/Qwen3.8-27B', name: 'Qwen3.8 27B (Hetzner)'},
+      ]},
+    });
+    await tick(); await tick(); await tick();
+
+    const opts = tab.byId['modelSel'].options;
+    const hz = opts.find(o => o.value === 'hetzner|Qwen/Qwen3.8-27B');
+    ok(!!hz, 'the hetzner model is offerable');
+    ok(hz && hz.textContent === 'Qwen3.8 27B (Hetzner)',
+       'offered by its name, not its wire id (got "' + (hz && hz.textContent) + '")');
+    ok(hz && hz.title === 'Qwen/Qwen3.8-27B', 'and the wire id stays one hover away');
+    const ds = opts.find(o => o.value === 'deepseek|deepseek-flash');
+    ok(ds && ds.textContent === 'DeepSeek V4.1 Flash', 'named models show their names');
+    ok(ds && ds.selected === true, 'and the current model is the selected one');
+
+    // The case that motivated this: a switch made anywhere but this dropdown.
+    tab.ctx.onEvent({data: JSON.stringify({type: 'model_changed',
+      model: {provider: 'hetzner', id: 'Qwen/Qwen3.8-27B'}})});
+    ok(tab.byId['modelSel'].value === 'hetzner|Qwen/Qwen3.8-27B',
+       'a model_changed event moves the selection live');
+
+    // …and still while a past session is open: same reason the gate case sits
+    // above the "viewing" guard in onEvent.
+    vm.runInContext('viewing = {file:"old.jsonl", dir:"archive", title:"Old"}', tab.ctx);
+    tab.ctx.onEvent({data: JSON.stringify({type: 'model_changed',
+      model: {provider: 'deepseek', id: 'deepseek-flash'}})});
+    ok(tab.byId['modelSel'].value === 'deepseek|deepseek-flash',
+       'the sync works while a past session is being read');
+
+    // A model the dropdown has never seen gets an option, labelled by name.
+    tab.ctx.onEvent({data: JSON.stringify({type: 'model_changed',
+      model: {provider: 'debof', id: 'qwen3-8b', name: 'Qwen3 8B (debof, fast)'}})});
+    const added = tab.byId['modelSel'].options.find(o => o.value === 'debof|qwen3-8b');
+    ok(added && added.textContent === 'Qwen3 8B (debof, fast)',
+       'an unknown model is added under its name (got "' + (added && added.textContent) + '")');
   }
 
   console.log();

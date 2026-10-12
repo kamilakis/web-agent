@@ -619,7 +619,7 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 // Bump when the page changes meaningfully; logged to the console at load so a
 // stale cached copy is immediately obvious.
-const UI_VERSION = '2026-10-12.1';
+const UI_VERSION = '2026-10-12.2';
 const H = TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {};
 const eventsUrl = '/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
 const logEl = document.getElementById('log');
@@ -1378,7 +1378,8 @@ function applyModelToSelect(m) {
   if (!opts.some(o => o.value === key)) {
     const opt = document.createElement('option');
     opt.value = key;
-    opt.textContent = m.id;
+    opt.textContent = m.name || m.id;
+    if (m.name) opt.title = m.id;
     modelSel.appendChild(opt);
   }
   modelSel.value = key;
@@ -2058,6 +2059,10 @@ function onEvent(e) {
     if (ev.enabled === false) sbMsg('\u26a0\ufe0f approval gate switched OFF', 6000);
     return;
   }
+  if (t === 'model_changed') {   // §25 switched from anywhere but this dropdown:
+    applyModelToSelect(ev.model); // curl, the photo auto-switch, another tab
+    return;
+  }
   if (t === 'ui_resolved') {
     if (dropUi(ev.id) && ev.why) sbMsg(ev.method + ': ' + ev.why);
     return;
@@ -2352,7 +2357,13 @@ console.info('[web-agent] dashboard ui ' + UI_VERSION);
     for (const m of list) {
       const opt = document.createElement('option');
       opt.value = m.provider + '|' + (m.id || m.modelId);
-      opt.textContent = m.id || m.modelId;
+      // The name, not the id. The id is the wire name the model server
+      // expects, and for a model that is not the provider's own
+      // ("Qwen/Qwen3.8-27B") it says nothing about who actually runs it —
+      // the name is the one that does ("Qwen3.8 27B (Hetzner)"). The id is
+      // kept as the hover title so it is one second away when it matters.
+      opt.textContent = m.name || m.id || m.modelId;
+      if (m.name) opt.title = m.id || m.modelId;
       if (opt.value === curId) opt.selected = true;
       modelSel.appendChild(opt);
     }

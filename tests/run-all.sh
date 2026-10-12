@@ -29,6 +29,7 @@ run bash service.test.sh
 run bash usage.test.sh
 run bash ui-relay.test.sh
 run bash gate.test.sh
+run bash model-switch.test.sh
 run bash errors.test.sh
 run bash hardening.test.sh
 run bash install.test.sh

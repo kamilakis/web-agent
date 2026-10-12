@@ -33,7 +33,7 @@ across surfaces.
     one row per call, described in plain language (`Running ls -la`) with the
     exact command and result behind a toggle, identical live and after a reload
   - **Stop** (`clear_queue` + `abort`) and **send-while-busy = steer**
-  - model switcher, status dot, reconnect with snapshot re-render
+  - model switcher — shows model names so a third-party model says who runs it (`Qwen3.8 27B (Hetzner)`, wire id on hover) — and follows a switch made from anywhere (curl, the photo auto-switch, a restart) live, not just on page load
   - **stays live on a phone**: an iPhone web app that is locked or sent to the
     background loses its stream and often resumes with a socket that looks
     open but delivers nothing. The daemon pings every 15s as a real event; the
