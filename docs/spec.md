@@ -1615,10 +1615,12 @@ The page embeds a UI build id; `/version` returns the daemon's. On load, a
 mismatch shows `⚠ stale page` under the header (the new daemon may have
 endpoints the old page can't use — the gate switch itself is the first case).
 A matching build pair shows nothing, and the badge clears on the next load
-after both halves of an update have been reloaded. `agent-session-install.sh`
-refuses to mix a new page with an old running daemon unless `NO_RESTART=1` is
-set, and it never restarts a daemon whose pi child is an active session
-without the same opt-in.
+after both halves of an update have been reloaded. `install.sh` with
+`NO_RESTART=1` installs only and leaves the old daemon running — which is how
+this feature itself was deployed, since the assistant is the pi process under
+the daemon; the badge carries the mismatch until the manual restart. A plain
+`./install.sh` restarts both units, interrupting a reply in flight; the
+daemon resumes the active transcript after.
 
 ## §25 The model dropdown follows the agent, and shows names
 
